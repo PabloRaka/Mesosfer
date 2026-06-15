@@ -183,8 +183,14 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, stop_on_tool_call=False):
+        """Same as generate, but does single prefill and then clones the KV cache.
+
+        stop_on_tool_call: when True, a row completes as soon as it emits <|tool_end|>
+        (a generic named tool call). This lets an external harness execute the tool and
+        feed back <|output_start|>...<|output_end|> before resuming generation, instead of
+        the model fabricating tool outputs. Default False keeps the original behaviour.
+        """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
         # NOTE: setting the dtype here and in this way is an ugly hack.
@@ -205,6 +211,7 @@ class Engine:
         output_end = get_special("<|output_end|>")
         assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
         bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
+        tool_end = get_special("<|tool_end|>") # generic named tool call terminator (used when stop_on_tool_call)
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
@@ -262,6 +269,10 @@ class Engine:
                 state.current_tokens.append(next_token)
                 # On <|assistant_end|> or <|bos|>, mark the row as completed
                 if next_token == assistant_end or next_token == bos:
+                    state.completed = True
+                # On <|tool_end|>, optionally hand control back to an external tool harness
+                # (instead of letting the model fabricate the tool output).
+                elif stop_on_tool_call and next_token == tool_end:
                     state.completed = True
                 # Handle tool logic
                 if next_token == python_start:
