@@ -29,7 +29,7 @@ from mesosfer.model.flash_attention import flash_attn
 @dataclass
 class GPTConfig:
     sequence_len: int = 2048
-    vocab_size: int = 65536
+    vocab_size: int = 98304        # 96K = 96 × 1024 (matches tok_train default; always overridden in practice)
     n_layer: int = 28              # Depth 28 for balanced reasoning (~380M params)
     n_head: int = 12               # 12 heads for diverse attention patterns
     n_kv_head: int = 12            # Full attention (GQA-compatible, head_dim=64)
@@ -321,7 +321,7 @@ class GPT(nn.Module):
         #              support sliding window backward yet)
         # S = (short_window, 0): bounded sliding window for compute savings on NVIDIA
         long_window = -1  # unlimited; backends interpret as full causal attention
-        short_window = -(-config.sequence_len // 4 // 128) * 128  # ceil to FA3 tile size (2048 -> 768)
+        short_window = -(-config.sequence_len // 4 // 128) * 128  # quarter context, ceil to 128-tile (seq 2048 -> 512)
         char_to_window = {
             "L": (long_window, 0),
             "S": (short_window, 0),

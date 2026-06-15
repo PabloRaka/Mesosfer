@@ -36,15 +36,22 @@ def _patch_missing_config_keys(model_config_kwargs):
         model_config_kwargs["grad_checkpoint"] = False
 
 def _patch_missing_keys(model_data, model_config):
-    """Add default values for new parameters that may be missing in old checkpoints."""
+    """Add default values for new parameters that may be missing in old checkpoints.
+
+    Tensors are created on the same device/dtype as the loaded checkpoint data so that
+    load_state_dict(assign=True) does not leave them on the wrong device.
+    """
     n_layer = model_config.n_layer
+    # Derive device from any existing checkpoint tensor (scalars stay fp32).
+    ref = next(iter(model_data.values()), None)
+    device = ref.device if ref is not None else torch.device("cpu")
     # resid_lambdas defaults to 1.0 (identity scaling)
     if "resid_lambdas" not in model_data:
-        model_data["resid_lambdas"] = torch.ones(n_layer)
+        model_data["resid_lambdas"] = torch.ones(n_layer, dtype=torch.float32, device=device)
         log0(f"Patching missing resid_lambdas in model data to 1.0")
     # x0_lambdas defaults to 0.0 (disabled)
     if "x0_lambdas" not in model_data:
-        model_data["x0_lambdas"] = torch.zeros(n_layer)
+        model_data["x0_lambdas"] = torch.zeros(n_layer, dtype=torch.float32, device=device)
         log0(f"Patching missing x0_lambdas in model data to 0.0")
 
 def save_checkpoint(checkpoint_dir, step, model_data, optimizer_data, meta_data, rank=0):
@@ -110,7 +117,16 @@ def build_model(checkpoint_dir, step, device, phase):
     # Load the model state
     model.to_empty(device=device)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
-    model.load_state_dict(model_data, strict=True, assign=True)
+    # strict=False: any small params added in later code versions (e.g. smear/backout gates,
+    # ve_gate) that are absent in older checkpoints keep their init_weights() values instead
+    # of hard-failing. We still require the large/critical params to be present.
+    load_result = model.load_state_dict(model_data, strict=False, assign=True)
+    if load_result.missing_keys:
+        log0(f"Checkpoint missing {len(load_result.missing_keys)} key(s); using init values: {load_result.missing_keys[:8]}")
+    if load_result.unexpected_keys:
+        log0(f"Checkpoint has {len(load_result.unexpected_keys)} unexpected key(s); ignored: {load_result.unexpected_keys[:8]}")
+    critical_missing = [k for k in ("transformer.wte.weight", "lm_head.weight") if k in load_result.missing_keys]
+    assert not critical_missing, f"Checkpoint is missing critical parameters: {critical_missing}"
     # Put the model in the right training phase / mode
     if phase == "eval":
         model.eval()
