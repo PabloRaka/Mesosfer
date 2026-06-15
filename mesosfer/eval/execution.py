@@ -66,6 +66,13 @@ def time_limit(seconds: float):
     def signal_handler(signum, frame):
         raise TimeoutException("Timed out!")
 
+    # signal.setitimer / SIGALRM are Unix-only. On Windows they don't exist, so we
+    # degrade to no hard timeout (callers should run untrusted code in a sandbox anyway).
+    has_itimer = hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM")
+    if not has_itimer:
+        yield
+        return
+
     signal.setitimer(signal.ITIMER_REAL, seconds)
     signal.signal(signal.SIGALRM, signal_handler)
     try:
@@ -144,8 +151,9 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
     with caution.
     """
 
-    if platform.uname().system != "Darwin":
-        # These resource limit calls seem to fail on macOS (Darwin), skip?
+    if platform.uname().system not in ("Darwin", "Windows"):
+        # These resource limit calls fail on macOS (Darwin); the `resource` module
+        # does not exist at all on Windows. Skip on both.
         import resource
         resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
         resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
