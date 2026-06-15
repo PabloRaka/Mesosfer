@@ -27,10 +27,20 @@ def timeout(duration, formula):
     def timeout_handler(signum, frame):
         raise Exception(f"'{formula}': timed out after {duration} seconds")
 
+    # signal.SIGALRM / signal.alarm are Unix-only. On platforms without them (e.g.
+    # Windows) we degrade gracefully and run without a hard timeout — the calculator
+    # only evaluates simple sandboxed expressions, so the risk is minimal.
+    has_alarm = hasattr(signal, "SIGALRM") and hasattr(signal, "alarm")
+    if not has_alarm:
+        yield
+        return
+
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(duration)
-    yield
-    signal.alarm(0)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
 
 def eval_with_timeout(formula, max_time=3):
     try:

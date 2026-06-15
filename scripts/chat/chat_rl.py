@@ -328,6 +328,9 @@ for step in range(num_steps):
     lrm = get_lr_multiplier(step)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
+    # Clip gradients to stabilize RL updates (policy-gradient losses can spike).
+    # Mirrors the clipping used in base_train.py / chat_sft.py.
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
     model.zero_grad(set_to_none=True)
     wandb_run.log({
@@ -349,6 +352,7 @@ for step in range(num_steps):
             None, # note: we don't bother to save the optimizer state
             {
                 "model_config": model_config_kwargs,
+                "step": step,
             }
         )
         print(f"✅ Saved model checkpoint to {checkpoint_dir}")

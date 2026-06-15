@@ -585,6 +585,12 @@ while True:
                     "n_kv_head": model.config.n_kv_head,
                     "n_embd": model.config.n_embd,
                     "window_pattern": model.config.window_pattern,
+                    # Architecture-affecting fields must be persisted or the SFT checkpoint
+                    # will rebuild with the wrong value-embedding layout (load_state_dict
+                    # key mismatch / silent corruption). ve_layers is critical; grad_checkpoint
+                    # is harmless to shapes but saved for completeness.
+                    "ve_layers": model.config.ve_layers,
+                    "grad_checkpoint": model.config.grad_checkpoint,
                 },
                 "user_config": user_config, # inputs to the training script
             },
