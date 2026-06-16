@@ -493,9 +493,9 @@ Features like GQA, Flash Attention 2/3, RoPE, RMSNorm, and BF16/FP8 are already 
 
 ## Sponsors
 
-Dukung pengembangan Mesosfer dengan menjadi sponsor kami!
+If you find Mesosfer useful and want to support its ongoing development, please consider sponsoring the project!
 
-[Become a Sponsor](https://github.com/sponsors/PabloRaka)
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-PabloRaka-ea4aaa?style=for-the-badge&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/PabloRaka)
 
 ---
 
