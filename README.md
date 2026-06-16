@@ -6,6 +6,7 @@
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-green.svg)](RUN_NVIDIA.md)
 [![ROCm 7.0](https://img.shields.io/badge/ROCm-7.0-orange.svg)](RUN_AMD.md)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Models-yellow.svg)](https://huggingface.co/Pabloraka)
+[![Sponsor](https://img.shields.io/badge/%E2%9D%A4%20Sponsor-GitHub-ea4aaa.svg)](https://github.com/sponsors/PabloRaka)
 
 A minimal full-stack cybersecurity-focused language model — from pretraining to chat.
 
@@ -487,6 +488,14 @@ python -m scripts.train.base_train \
 ```
 
 Features like GQA, Flash Attention 2/3, RoPE, RMSNorm, and BF16/FP8 are already implemented and designed for large-scale training. The main practical constraints for 7B+ models are **data volume** (current dataset ~100B tokens covers up to ~6.5B scaling params at ratio≈15) and **hardware** (7B in BF16 requires ~14GB weights + optimizer state, recommend 2–4× A100/H100 80GB or 1× MI300X).
+
+---
+
+## Sponsors
+
+Dukung pengembangan Mesosfer dengan menjadi sponsor kami!
+
+[Become a Sponsor](https://github.com/sponsors/PabloRaka)
 
 ---
 
