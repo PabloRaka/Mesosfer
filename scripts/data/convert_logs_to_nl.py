@@ -21,6 +21,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,12 +79,45 @@ MITRE = {
 # ---------------------------------------------------------------------------
 
 def _safe_read(path: Path) -> str:
-    """Read a file, tolerating encoding errors."""
+    """Read a full file into memory (JSON/XML/TSV formats only, with size guard).
+
+    Warns if the file exceeds 500 MiB and returns empty string to prevent OOM.
+    Prefer ``_iter_lines()`` for line‑oriented text/JSONL logs.
+    """
+    if not path.is_file():
+        logger.warning("Missing log file: %s – skipping", path)
+        return ""
     try:
+        size = path.stat().st_size
+        if size > 500 * 1024 * 1024:
+            logger.warning(
+                "File %s is %.1f MiB – too large for in‑memory read, skipping",
+                path, size / (1024 * 1024),
+            )
+            return ""
         return path.read_text(encoding="utf-8", errors="replace")
     except Exception as exc:
         logger.warning("Cannot read %s: %s", path, exc)
         return ""
+
+
+def _iter_lines(path: Path) -> Iterable[str]:
+    """Yield non‑empty, stripped lines from a text/JSONL file (streaming).
+
+    Processes very large files without loading the entire content into memory.
+    Empty lines and lines that become empty after stripping are skipped.
+    """
+    if not path.is_file():
+        logger.warning("Missing log file: %s – skipping", path)
+        return
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield line
+    except Exception as exc:
+        logger.warning("Cannot read %s (streaming): %s", path, exc)
 
 
 def _ts_to_dt(ts_str: str) -> datetime | None:
@@ -410,10 +444,12 @@ def _narrate_syslog_group(group: list[dict]) -> str:
 
 
 def convert_syslog(path: Path) -> list[str]:
-    """Parse a syslog-format file and return a list of narrative strings."""
-    text = _safe_read(path)
+    """Parse a syslog-format file and return a list of narrative strings.
+
+    Uses streaming line‑by‑line reader for memory efficiency on large logs.
+    """
     events = []
-    for line in text.splitlines():
+    for line in _iter_lines(path):
         ev = _parse_syslog_line(line)
         if ev:
             events.append(ev)
@@ -600,9 +636,10 @@ def _narrate_apache_group(lines: list[str], all_lines: list[str]) -> str:
 
 
 def convert_apache(path: Path) -> list[str]:
-    text = _safe_read(path)
-    all_lines = text.splitlines()
+    all_lines = list(_iter_lines(path))
     access_lines = [l for l in all_lines if _APACHE_RE.match(l)]
+    if not access_lines:
+        return []
     groups = _group_apache_events(access_lines)
     narratives = []
     for grp in groups:
@@ -744,9 +781,8 @@ def _narrate_cef_group(group: list[dict]) -> str:
 
 
 def convert_cef(path: Path) -> list[str]:
-    text = _safe_read(path)
     events = []
-    for line in text.splitlines():
+    for line in _iter_lines(path):
         ev = _parse_cef_line(line)
         if ev:
             events.append(ev)
@@ -927,6 +963,19 @@ def _parse_jsonl(text: str) -> list[dict]:
     return records
 
 
+def _parse_jsonl_streaming(path: Path) -> Iterable[dict]:
+    """Yield JSON objects from a JSONL file using a streaming reader.
+
+    Memory‑efficient: only one line is kept in memory at a time.
+    Non‑parseable lines are logged and skipped.
+    """
+    for line in _iter_lines(path):
+        try:
+            yield json.loads(line)
+        except json.JSONDecodeError as e:
+            logger.warning("JSONL parse error in %s: %s", path, e)
+
+
 def _group_suricata_by_src(records: list[dict]) -> list[list[dict]]:
     """Group Suricata/Zeek JSONL records by source IP."""
     by_src: dict[str, list[dict]] = defaultdict(list)
@@ -1060,8 +1109,7 @@ def _narrate_suricata_group(group: list[dict]) -> str:
 
 
 def convert_suricata_jsonl(path: Path) -> list[str]:
-    text = _safe_read(path)
-    records = _parse_jsonl(text)
+    records = list(_parse_jsonl_streaming(path))
     if not records:
         return []
     groups = _group_suricata_by_src(records)

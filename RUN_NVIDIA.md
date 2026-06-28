@@ -110,7 +110,7 @@ export WANDB_RUN=my_training_run
 - Recommended for production training
 
 ```bash
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
+torchrun --standalone --nproc_per_node=8 -m scripts.train.base_train -- \
     --depth=24 \
     --fp8 \
     --device-batch-size=16 \
@@ -125,7 +125,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
 - Good balance of cost and performance
 
 ```bash
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
+torchrun --standalone --nproc_per_node=8 -m scripts.train.base_train -- \
     --depth=20 \
     --device-batch-size=16 \
     --run=$WANDB_RUN
@@ -140,13 +140,13 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
 
 ```bash
 # Single GPU training
-python -m scripts.base_train -- \
+python -m scripts.train.base_train -- \
     --depth=12 \
     --device-batch-size=8 \
     --run=dummy
 
 # 4-GPU L4/L40S node
-torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- \
+torchrun --standalone --nproc_per_node=4 -m scripts.train.base_train -- \
     --depth=16 \
     --device-batch-size=16 \
     --run=$WANDB_RUN
@@ -166,7 +166,7 @@ export mesosfer_DTYPE=float16
 export PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb=512"
 
 # Single T4 training (small model recommended)
-python -m scripts.base_train -- \
+python -m scripts.train.base_train -- \
     --depth=6 \
     --head-dim=64 \
     --max-seq-len=1024 \
@@ -175,7 +175,7 @@ python -m scripts.base_train -- \
     --run=dummy
 
 # Multi-T4 inference cluster
-torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- \
+torchrun --standalone --nproc_per_node=4 -m scripts.train.base_train -- \
     --depth=8 \
     --device-batch-size=8 \
     --max-seq-len=1024 \
@@ -252,7 +252,7 @@ bash runs/runcpu.sh
 
 ## Command Line Arguments
 
-Common arguments for `scripts/base_train.py`:
+Common arguments for `scripts/train/base_train.py`:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -296,20 +296,20 @@ After training completes, you can interact with the model:
 ### CLI Chat
 
 ```bash
-python -m scripts.chat_cli -p "Why is the sky blue?"
+python -m scripts.chat.chat_cli -p "Why is the sky blue?"
 ```
 
 ### Interactive CLI
 
 ```bash
-python -m scripts.chat_cli
+python -m scripts.chat.chat_cli
 # Type your questions, Ctrl+D to exit
 ```
 
 ### Web UI
 
 ```bash
-python -m scripts.chat_web
+python -m scripts.chat.chat_web
 # Opens http://localhost:8000
 ```
 
@@ -397,7 +397,7 @@ pip install flash-attn --no-build-isolation
 3. **Run with correct parallelism:**
    ```bash
    # For 4 GPUs:
-   torchrun --standalone --nproc_per_node=4 -m scripts.base_train -- ...
+   torchrun --standalone --nproc_per_node=4 -m scripts.train.base_train -- ...
    ```
 
 ### Performance Issues
@@ -450,5 +450,5 @@ python -c "import torch; print(f'Compute dtype: {torch.float32 if not torch.cuda
 python -c "from mesosfer.model.flash_attention import flash_attn_func; print('Flash Attention available')"
 
 # 4. Quick test run
-python -m scripts.base_train --depth=4 --num-iterations=10 --run=dummy --device-batch-size=1
+python -m scripts.train.base_train --depth=4 --num-iterations=10 --run=dummy --device-batch-size=1
 ```

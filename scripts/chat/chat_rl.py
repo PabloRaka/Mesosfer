@@ -10,10 +10,10 @@ simpler and more similar to just REINFORCE:
 4) Instead of z-score normalization (r - mu)/sigma, only use (r - mu) as the advantage.
 
 1 GPU:
-python -m scripts.chat_rl
+python -m scripts.chat.chat_rl
 
 8 GPUs:
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
+torchrun --standalone --nproc_per_node=8 -m scripts.chat.chat_rl -- --run=default
 """
 
 import argparse
@@ -112,6 +112,13 @@ print0(f"Train rows: {len(train_task)}, Val rows: {len(val_task)}")
 
 num_steps = (len(train_task) // args.examples_per_step) * args.num_epochs
 print0(f"Calculated number of steps: {num_steps}")
+
+# `step` is referenced inside the get_batch() generator (to seed each rollout).
+# The training loop rebinds it via `for step in range(num_steps):` below, but
+# generators resolve free variables at call time, so initialize it explicitly
+# here to avoid a NameError if the generator is advanced before that loop runs
+# (e.g. by an early eval path).
+step = 0
 
 @torch.no_grad()
 def get_batch():

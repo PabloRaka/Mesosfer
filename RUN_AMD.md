@@ -162,7 +162,7 @@ export mesosfer_TORCH_BACKEND=rocm
 export ROCM_BLIS_LC=1
 
 # 8-GPU configuration with depth 24 best-practice flags
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
+torchrun --standalone --nproc_per_node=8 -m scripts.train.base_train -- \
     --depth=24 \
     --target-param-data-ratio=10 \
     --device-batch-size=16 \
@@ -187,7 +187,7 @@ Popular for large-scale inference and training:
 ```bash
 # Single MI300X (1 logical device = 8 GCDs unified)
 export HIP_VISIBLE_DEVICES=0
-torchrun --standalone --nproc_per_node=1 -m scripts.base_train -- \
+torchrun --standalone --nproc_per_node=1 -m scripts.train.base_train -- \
     --depth=24 \
     --target-param-data-ratio=10 \
     --device-batch-size=16 \
@@ -222,7 +222,7 @@ Entry-level compute GPU:
 # Single MI210
 export HIP_VISIBLE_DEVICES=0
 
-python -m scripts.base_train -- \
+python -m scripts.train.base_train -- \
     --depth=12 \
     --device-batch-size=8 \
     --run=dummy
@@ -330,7 +330,7 @@ bash runs/runcpu.sh
 
 ## Command Line Arguments
 
-Common arguments for `scripts/base_train.py`:
+Common arguments for `scripts/train/base_train.py`:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -374,10 +374,10 @@ Common arguments for `scripts/base_train.py`:
 
 ```bash
 # CLI Chat
-python -m scripts.chat_cli -p "Why is the sky blue?"
+python -m scripts.chat.chat_cli -p "Why is the sky blue?"
 
 # Web UI
-python -m scripts.chat_web
+python -m scripts.chat.chat_web
 ```
 
 ---
@@ -461,7 +461,7 @@ python -c "import torch; print(torch.version.hip)"
 3. **Test with fewer GPUs:**
    ```bash
    export HIP_VISIBLE_DEVICES=0,1  # Only 2 GPUs
-   torchrun --standalone --nproc_per_node=2 -m scripts.base_train -- ...
+   torchrun --standalone --nproc_per_node=2 -m scripts.train.base_train -- ...
    ```
 
 ### Performance Issues
@@ -526,7 +526,7 @@ python -c "from mesosfer.model.flash_attention import ATTENTION_BACKEND; print(f
 
 # 5. Quick test run (depth 4, 10 steps, no GPU memory pressure)
 export mesosfer_TORCH_BACKEND=rocm
-python -m scripts.base_train -- --depth=4 --num-iterations=10 --run=dummy --device-batch-size=1 --core-metric-every=-1
+python -m scripts.train.base_train -- --depth=4 --num-iterations=10 --run=dummy --device-batch-size=1 --core-metric-every=-1
 ```
 
 ---

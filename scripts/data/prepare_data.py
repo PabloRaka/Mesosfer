@@ -4,16 +4,18 @@ Prepare a high-quality, cybersecurity-focused pretraining dataset for mesosfer.
 Version 3: Replaces gated/broken datasets with fully public alternatives.
 
 Usage:
-    python -m scripts.prepare_data_v3
-    python -m scripts.prepare_data_v3 --max-tokens 1000000000  # limit to 1B for quick test
-    python -m scripts.prepare_data_v3 --sources trendyol_cyber,cybernative_vuln  # specific sources only
-    python -m scripts.prepare_data_v3 --status              # check download progress
-    python -m scripts.prepare_data_v3 --fresh               # discard previous progress and restart
+    python -m scripts.data.prepare_data
+    python -m scripts.data.prepare_data --max-tokens 1000000000  # limit to 1B for quick test
+    python -m scripts.data.prepare_data --sources project_zero,unit42  # specific sources only
+    python -m scripts.data.prepare_data --status              # check download progress
+    python -m scripts.data.prepare_data --fresh               # discard previous progress and restart
 """
 
 import os
+import sys
 import json
 import glob
+import hashlib
 import shutil
 import subprocess
 import argparse
@@ -35,6 +37,16 @@ try:
 except ModuleNotFoundError:
     load_dataset = None
 
+if load_dataset is None:
+    # The warning is repeated later when a HF source is hit, but we fail
+    # immediately so the user can install the package before running a
+    # multi‑hour pipeline.
+    logger = logging.getLogger(__name__)
+    logger.warning(
+        "The 'datasets' package is not installed. Hugging Face dataset sources "
+        "will be skipped. To use them, run: pip install datasets"
+    )
+
 try:
     from mesosfer.utils.common import get_base_dir
 except ModuleNotFoundError:
@@ -50,15 +62,44 @@ except ModuleNotFoundError:
 
 logger = logging.getLogger(__name__)
 
+
+def _check_free_space(path: Path, required_bytes: int) -> None:
+    """Raise RuntimeError if free disk space below required_bytes."""
+    try:
+        stat = shutil.disk_usage(str(path.parent if path.is_file() else path))
+        if stat.free < required_bytes:
+            raise RuntimeError(
+                f"Insufficient free disk space on {path}: "
+                f"need {required_bytes / (1024**3):.2f} GiB, "
+                f"only {stat.free / (1024**3):.2f} GiB available"
+            )
+    except OSError as e:
+        logger.warning("Unable to check disk space for %s: %s", path, e)
+
 # =============================================================================
 # Load .env from the mesosfer project directory
 # =============================================================================
 
 def _load_env_file():
-    env_path = Path(__file__).resolve().parents[2] / ".env"
-    if not env_path.exists():
+    """Load a ``.env`` file.
+
+    The original implementation only looked two levels up from this file,
+    which fails when the script is executed from a different working
+    directory. We now search in two locations: the repository root and the
+    current working directory. The first file found is loaded. If no file
+    is present we simply continue – missing environment variables will be
+    warned about later.
+    """
+    possible_paths = [
+        Path(__file__).resolve().parents[2] / ".env",  # project root
+        Path.cwd() / ".env",  # cwd (useful when invoking from repo root)
+    ]
+    env_path = next((p for p in possible_paths if p.is_file()), None)
+    if env_path is None:
+        logger.debug("No .env file found in project root or cwd")
         return
-    with open(env_path, encoding="utf-8") as f:
+    logger.debug("Loading .env from %s", env_path)
+    with env_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
@@ -1282,12 +1323,27 @@ def format_vulnerability_record(row):
 # Core data processing
 # =============================================================================
 
-def _urlopen(url):
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "mesosfer-data-prep/3.0 (+https://nvd.nist.gov/vuln/data-feeds)"},
-    )
-    return urllib.request.urlopen(request, timeout=120)
+def _urlopen(url, retries: int = 3, backoff: float = 1.5):
+    """Open a URL with exponential‑backoff retry.
+
+    The original implementation performed a single request and raised on any
+    failure, which caused the whole pipeline to abort on transient network
+    glitches. This helper now retries *retries* times, waiting ``backoff * attempt``
+    seconds between attempts, and finally propagates the last exception if all
+    attempts fail.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": "mesosfer-data-prep/3.0 (+https://nvd.nist.gov/vuln/data-feeds)"},
+            )
+            return urllib.request.urlopen(request, timeout=120)
+        except Exception as exc:  # pragma: no cover – exercised via retry path
+            logger.warning("Attempt %d/%d: failed to fetch %s – %s", attempt, retries, url, exc)
+            if attempt == retries:
+                raise
+            time.sleep(backoff * attempt)
 
 def stream_nvd_feed_texts(source_name, source_config, max_chars):
     start_year = int(source_config.get("start_year", 2002))
@@ -1895,11 +1951,22 @@ def stream_dataset_texts(source_name, source_config, global_max_tokens=None, ski
 
 
 def write_shard(texts, shard_path):
+    """Write a list of texts to a parquet shard.
+
+    Handles permission errors gracefully so the pipeline can continue.
+    """
     tmp_path = shard_path + ".tmp"
     df = pd.DataFrame({"text": texts})
-    df.to_parquet(tmp_path, index=False, engine="pyarrow")
-    os.replace(tmp_path, shard_path)
-    logger.info(f"  Wrote {len(texts):,} docs to {shard_path}")
+    try:
+        df.to_parquet(tmp_path, index=False, engine="pyarrow")
+        os.replace(tmp_path, shard_path)
+        logger.info(f"  Wrote {len(texts):,} docs to {shard_path}")
+    except PermissionError as e:
+        logger.error("Permission denied while writing %s: %s", shard_path, e)
+        raise
+    except OSError as e:
+        logger.error("IO error while writing %s: %s", shard_path, e)
+        raise
 
 # =============================================================================
 # Progress / resume helpers
@@ -1968,12 +2035,21 @@ def val_part_path(output_dir, part_idx):
 def list_val_part_files(output_dir):
     return sorted(glob.glob(os.path.join(output_dir, "val_part_*.valpart")))
 
-def split_train_val_docs(docs, val_ratio):
+def split_train_val_docs(docs, val_ratio=0.05):
+    """Split document list into train/val sets.
+
+    Guarantees at least one training document even when the source is very
+    small, preventing the degenerate case where all docs end up in validation.
+    """
     if not docs:
         return [], []
-    val_size = int(len(docs) * val_ratio)
-    if val_ratio > 0 and val_size == 0:
-        val_size = 1
+    if not (0 < val_ratio < 1):
+        logger.warning("Invalid val_ratio %s, falling back to 0.05", val_ratio)
+        val_ratio = 0.05
+    val_size = max(1, int(len(docs) * val_ratio))
+    # Never allocate the entire set to validation
+    if val_size >= len(docs):
+        val_size = len(docs) - 1
     if val_size <= 0:
         return docs, []
     return docs[:-val_size], docs[-val_size:]
@@ -2000,18 +2076,24 @@ def write_final_val_shard(output_dir, shard_path):
     return True
 
 def create_checkpoint(output_dir, checkpoint_dir, checkpoint_number):
+    # Check free disk before creating checkpoint (needs at least 6 GiB)
+    _check_free_space(Path(checkpoint_dir), 6 * 1024 ** 3)
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_name = f"data_checkpoint_{checkpoint_number:03d}"
     archive_path = os.path.join(checkpoint_dir, checkpoint_name)
 
     logger.info(f"  💾 Creating checkpoint #{checkpoint_number} → {archive_path}.tar.gz")
-    shutil.make_archive(
+    result = shutil.make_archive(
         archive_path,
         "gztar",
         root_dir=os.path.dirname(output_dir),
         base_dir=os.path.basename(output_dir),
     )
+    if not result:
+        raise RuntimeError(f"Checkpoint creation failed (returned empty path) for {archive_path}")
     archive_full = archive_path + ".tar.gz"
+    if not os.path.isfile(archive_full):
+        raise RuntimeError(f"Checkpoint archive not found after creation: {archive_full}")
     size_gb = os.path.getsize(archive_full) / (1024**3)
     logger.info(f"  💾 Checkpoint saved: {archive_full} ({size_gb:.2f} GB)")
     return archive_full
@@ -2221,6 +2303,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                 break
 
             if global_max_chars is not None and global_chars + len(text) > global_max_chars:
+                global_chars = global_max_chars
                 break
 
             current_shard.append(text)
@@ -2418,7 +2501,7 @@ def main():
     parser.add_argument("--checkpoint-dir", type=str, default=None,
                         help="Directory to save checkpoints")
     parser.add_argument("--checkpoint-every-gb", type=float, default=10.0,
-                        help="Create a checkpoint every N GB of data written")
+                        help="Create a checkpoint every N GB of data written (must be > 0, default 10.0)")
     parser.add_argument("--shuffle-mode", type=str, default="interleaved",
                         choices=["sequential", "interleaved"],
                         help="'interleaved' = domain-mixed shards (recommended), "
@@ -2433,7 +2516,33 @@ def main():
                         help="Number of ClimbMix pretraining shards to download directly (e.g. 170)")
     parser.add_argument("--download-workers", type=int, default=4,
                         help="Number of parallel download workers (default: 4)")
+    parser.add_argument("--sample-10k", action="store_true",
+                      help="Prepare a tiny 10,000-token sample of datasets for fast testing")
     args = parser.parse_args()
+
+    # Override defaults if `--sample-10k` is active
+    if args.sample_10k:
+        if args.max_tokens is None:
+            args.max_tokens = 10000
+        if args.shard_size == 100_000:
+            args.shard_size = 100
+        if args.output_dir == "base_data_cybersecurity":
+            args.output_dir = "base_data_cybersecurity_sample"
+
+    # Validate checkpoint interval
+    if args.checkpoint_every_gb <= 0:
+        parser.error("--checkpoint-every-gb must be > 0")
+
+    # Validate log level from environment
+    env_level = os.getenv("PREPARE_DATA_LOG_LEVEL")
+    if env_level is not None:
+        numeric_level = getattr(logging, env_level.upper(), None)
+        if not isinstance(numeric_level, int):
+            logger.warning("Invalid PREPARE_DATA_LOG_LEVEL=%r, falling back to INFO", env_level)
+            logger.setLevel(logging.INFO)
+        else:
+            logger.setLevel(numeric_level)
+
     base_dir = get_base_dir()
 
     if args.download_climbmix is not None:
@@ -2444,9 +2553,11 @@ def main():
     if not args.dry_run and not args.status:
         climbmix_dir = os.path.join(base_dir, "base_data_climbmix")
         existing_shards = [f for f in os.listdir(climbmix_dir) if f.endswith('.parquet')] if os.path.exists(climbmix_dir) else []
-        if len(existing_shards) < 171:
-            logger.info("  ℹ️ ClimbMix general pretraining shards not found or incomplete. Downloading baseline 170 shards automatically...")
-            download_climbmix_shards(170, args.download_workers)
+        required_shards = 2 if args.sample_10k else 171
+        if len(existing_shards) < required_shards:
+            shards_to_download = required_shards - 1
+            logger.info(f"  ℹ️ ClimbMix general pretraining shards not found or incomplete. Downloading baseline {shards_to_download} shards automatically...")
+            download_climbmix_shards(shards_to_download, args.download_workers)
 
     output_dir = os.path.join(base_dir, args.output_dir)
     os.makedirs(output_dir, exist_ok=True)
@@ -2463,6 +2574,9 @@ def main():
                 raise ValueError(f"Unknown source: {name}. Available: {available}")
     else:
         source_names = list(DATASET_SOURCES.keys())
+        if args.sample_10k:
+            # Skip extremely slow/heavy sources for quick sample testing
+            source_names = [s for s in source_names if s not in ("all_cve_records", "circl_vuln_patch")]
 
     if args.dry_run:
         print_dry_run_summary(args, source_names, output_dir)
@@ -2771,5 +2885,19 @@ def verify_shard_balance(data_dir):
     print()
 
 
+def _main_with_guard():
+    """Wrap ``main()`` with ``KeyboardInterrupt`` handling.
+
+    When the user presses Ctrl+C during a long preparation run we log the
+    interruption and exit with a non‑zero code rather than leaving a half‑
+    written shard or a corrupted progress file.
+    """
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.warning("KeyboardInterrupt received – aborting data preparation")
+        sys.exit(130)
+
+
 if __name__ == "__main__":
-    main()
+    _main_with_guard()

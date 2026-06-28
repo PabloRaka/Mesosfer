@@ -117,6 +117,22 @@ def build_model(checkpoint_dir, step, device, phase):
     # Load the model state
     model.to_empty(device=device)
     model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
+    # Validate value-embedding keys BEFORE loading: if the checkpoint was trained with a
+    # different ve_layers configuration, value-embedding parameters will silently get
+    # init_weights() random values because strict=False. This would corrupt inference.
+    ckpt_ve_keys = [k for k in model_data if k.startswith("value_embeds.")]
+    model_ve_keys = [k for k in model.state_dict() if k.startswith("value_embeds.")]
+    ckpt_ve_set = set(ckpt_ve_keys)
+    model_ve_set = set(model_ve_keys)
+    missing_ve = model_ve_set - ckpt_ve_set
+    extra_ve = ckpt_ve_set - model_ve_set
+    if missing_ve or extra_ve:
+        log0(f"CRITICAL: Value-embedding mismatch! Missing VE keys: {sorted(missing_ve)}")
+        log0(f"CRITICAL: Extra/unused VE keys: {sorted(extra_ve)}")
+        log0("CRITICAL: Checkpoint ve_layers differs from model config. "
+              "Value embeddings will be randomly initialized – model output WILL be corrupted. "
+              "Train with the same --ve-layers or omit it to use the legacy alternating layout.")
+
     # strict=False: any small params added in later code versions (e.g. smear/backout gates,
     # ve_gate) that are absent in older checkpoints keep their init_weights() values instead
     # of hard-failing. We still require the large/critical params to be present.

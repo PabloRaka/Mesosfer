@@ -60,16 +60,16 @@ python -m mesosfer.utils.report reset
 # so we download 2e9 / 250e6 = 8 data shards at this point
 # each shard is ~100MB of text (compressed), so this is about ~800MB of data on disk
 # look at dev/repackage_data_reference.py for details on how this data was prepared
-python -m mesosfer.data.dataset -n 8
+python -m scripts.data.prepare_data --download-climbmix 8
 # Immediately also kick off downloading more shards in the background while tokenizer trains
 # Approximately 150 shards are needed for GPT-2 capability pretraining, add 20 for padding.
 # The maximum total number of shards available in the entire dataset is 6542.
-python -m mesosfer.data.dataset -n 170 &
+python -m scripts.data.prepare_data --download-climbmix 170 &
 DATASET_DOWNLOAD_PID=$!
 # train the tokenizer with vocab size 96K = 98304 on ~2B characters of data
-python -m scripts.tok_train
+python -m scripts.train.tok_train
 # evaluate the tokenizer (report compression ratio etc.)
-python -m scripts.tok_eval
+python -m scripts.eval.tok_eval
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
@@ -80,9 +80,9 @@ wait $DATASET_DOWNLOAD_PID
 #   --target-param-data-ratio=10  : compromise between speedrun (8, undertrained) and compute-optimal (12)
 #   --warmup-steps=200            : longer warmup needed for d24 (~500M params) to stabilize Muon momentum buffer
 #   --window-pattern=L            : full attention (required for ROCm FA2; on NVIDIA 'SSL' is faster)
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=24 --target-param-data-ratio=10 --device-batch-size=16 --warmup-steps=200 --window-pattern=L --fp8 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=8 -m scripts.train.base_train -- --depth=24 --target-param-data-ratio=10 --device-batch-size=16 --warmup-steps=200 --window-pattern=L --fp8 --run=$WANDB_RUN
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-size=16
+torchrun --standalone --nproc_per_node=8 -m scripts.eval.base_eval -- --device-batch-size=16
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
@@ -92,14 +92,14 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-
 curl -L -o $mesosfer_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run SFT and eval the model
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16 --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node=8 -m scripts.chat.chat_sft -- --device-batch-size=16 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=8 -m scripts.chat.chat_eval -- -i sft
 
 # chat with the model over CLI! Leave out the -p to chat interactively
-# python -m scripts.chat_cli -p "Why is the sky blue?"
+# python -m scripts.chat.chat_cli -p "Why is the sky blue?"
 
 # even better, chat with your model over a pretty WebUI ChatGPT style
-# python -m scripts.chat_web
+# python -m scripts.chat.chat_web
 
 # -----------------------------------------------------------------------------
 # Generate the full report by putting together all the sections

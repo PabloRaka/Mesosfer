@@ -505,8 +505,22 @@ class GPT(nn.Module):
         logits = softcap * torch.tanh(logits / softcap) # squash the logits
 
         if targets is not None:
-            # training: given the targets, compute and return the loss
-            # TODO experiment with chunked cross-entropy?
+            # training: given the targets, compute and return the loss.
+            # targets may legitimately contain -1 (ignore_index) for masked positions
+            # (user/prompt/BOS/padding/tool-output tokens that must NOT be supervised).
+            # Anything outside {-1} ∪ [0, vocab_size) indicates a real tokenizer/model
+            # vocab mismatch — fail fast. (The previous code clamped to [0, vocab_size),
+            # which silently turned every -1 into token 0 and DESTROYED the loss mask.)
+            vocab_size = self.config.vocab_size
+            t_max = targets.max().item()
+            t_min = targets.min().item()
+            if t_max >= vocab_size or t_min < -1:
+                raise ValueError(
+                    f"Target token ids out of range: min={t_min}, max={t_max}. "
+                    f"Valid values are -1 (ignore_index) or [0, {vocab_size}). "
+                    f"This means the tokenizer vocabulary does not match the model's "
+                    f"vocab_size — retrain the tokenizer/model with matching vocab."
+                )
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:
