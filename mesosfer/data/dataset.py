@@ -38,7 +38,8 @@ DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
 # sequence, so the validation shard is always taken from the LAST file of the
 # LAST directory (typically ClimbMix's shard_06542.parquet).
 AUXILIARY_DATA_DIRS = [
-    os.path.join(base_dir, "base_data_cybersecurity"),  # output of scripts.data.prepare_data
+    os.path.join(base_dir, "base_data_cybersecurity"),          # output of scripts.data.prepare_data
+    os.path.join(base_dir, "base_data_cybersecurity_sample"),   # sample output of --sample-10k
 ]
 
 # -----------------------------------------------------------------------------

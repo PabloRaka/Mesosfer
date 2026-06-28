@@ -4,8 +4,8 @@ All the generic code lives here, and all the evaluation-specific
 code lives in mesosfer directory and is imported from here.
 
 Example runs:
-python -m scripts.chat_eval -a ARC-Easy
-torchrun --nproc_per_node=8 -m scripts.chat_eval -- -a ARC-Easy
+python -m scripts.chat.chat_eval -a ARC-Easy
+torchrun --nproc_per_node=8 -m scripts.chat.chat_eval -- -a ARC-Easy
 """
 
 import argparse

@@ -19,8 +19,8 @@ if [ -z "$SKIP_SETUP" ]; then
 
     # Tokenizer, download 1000 shards for pretraining
     # (probably this can be reduced but it's tricky to determine the exact right number, TODO).
-    python -m mesosfer.data.dataset -n 1000
-    python -m scripts.tok_train --max-chars=2000000000 --vocab-size=65536
+    python -m scripts.data.prepare_data --download-climbmix 1000
+    python -m scripts.train.tok_train --max-chars=2000000000 --vocab-size=65536
 else
     source .venv/bin/activate
 fi
@@ -66,7 +66,7 @@ for d in "${DEPTHS[@]}"; do
         DEVICE_BATCH_SIZE_ARG="--device-batch-size=32"
     fi
 
-    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \
+    torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.train.base_train -- \
         --depth=$d \
         --run="${WANDB_RUN}_d${d}" \
         --model-tag="${TAG}" \

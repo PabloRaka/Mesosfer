@@ -24,7 +24,7 @@ python3 dev/generate_Mesosfer_identity_data.py --num 1000
 python3 dev/generate_Mesosfer_cyber_sft.py --train-size 5000 --val-size 300
 ```
 
-By default, `scripts.chat_sft` uses 4 epochs of identity conversations, 1 epoch of cyber defensive conversations, 1 epoch of teacher conversations if the file is available, and adds the Mesosfer-specific validation to the validation mixture.
+By default, `scripts.chat.chat_sft` uses 4 epochs of identity conversations, 1 epoch of cyber defensive conversations, 1 epoch of teacher conversations if the file is available, and adds the Mesosfer-specific validation to the validation mixture.
 
 Regenerate the instruction-following polish set:
 
@@ -85,7 +85,7 @@ python3 -m scripts.chat.chat_sft \
 Override examples:
 
 ```bash
-python3 -m scripts.chat_sft --identity-epochs 5 --cyber-epochs 2 --teacher-epochs 1
+python3 -m scripts.chat.chat_sft --identity-epochs 5 --cyber-epochs 2 --teacher-epochs 1
 ```
 
 ## Gemini Teacher Data

@@ -11,13 +11,13 @@ Default is all three: --eval core,bpb,sample
 Examples:
 
     # Evaluate a HuggingFace model (e.g. GPT-2 124M) using 8 GPUs
-    torchrun --nproc_per_node=8 -m scripts.base_eval --hf-path openai-community/gpt2
+    torchrun --nproc_per_node=8 -m scripts.eval.base_eval --hf-path openai-community/gpt2
 
     # Evaluate a mesosfer model (e.g. d24) using 8 GPUs
-    torchrun --nproc_per_node=8 -m scripts.base_eval --model-tag d24 --device-batch-size=16
+    torchrun --nproc_per_node=8 -m scripts.eval.base_eval --model-tag d24 --device-batch-size=16
 
     # Quick/approximate evaluation using a single GPU
-    python -m scripts.base_eval --model-tag d24 --device-batch-size=16 --max-per-task=100 --split-tokens=524288
+    python -m scripts.eval.base_eval --model-tag d24 --device-batch-size=16 --max-per-task=100 --split-tokens=524288
 """
 import os
 import csv

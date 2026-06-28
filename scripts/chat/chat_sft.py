@@ -2,11 +2,11 @@
 Supervised fine-tuning (SFT) the model.
 Run as:
 
-python -m scripts.chat_sft
+python -m scripts.chat.chat_sft
 
 Or torchrun for training:
 
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16
+torchrun --standalone --nproc_per_node=8 -m scripts.chat.chat_sft -- --device-batch-size=16
 """
 
 import gc
@@ -219,6 +219,9 @@ for group in optimizer.param_groups:
 
 # SFT data mixture and DataLoader
 sft_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "sft"))
+sft_sample_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "sft_sample"))
+if os.path.exists(sft_sample_dir) and not os.path.exists(sft_dir):
+    sft_dir = sft_sample_dir
 identity_conversations_filepath = os.path.join(sft_dir, "identity_conversations.jsonl")
 identity_conversations_en_filepath = os.path.join(sft_dir, "identity_conversations_en.jsonl")
 rules_filepath = os.path.join(sft_dir, "rules.jsonl")
@@ -307,6 +310,7 @@ elif not args.disable_cybersec_sft:
         aquilax_security_reasoning_epochs=args.aquilax_security_reasoning_epochs,
         xlam_function_calling_epochs=args.xlam_function_calling_epochs,
         include_english=bool(args.include_english_sft),
+        sft_dir=sft_dir,
     )
     train_tasks.extend(cybersec_tasks)
     print0(f"Added cybersec SFT: {len(cybersec_tasks)} task instances, {total_cybersec_rows(cybersec_tasks):,} total rows")

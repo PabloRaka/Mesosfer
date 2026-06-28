@@ -216,11 +216,21 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
 
     # Distributed setup: Distributed Data Parallel (DDP), optional, and requires CUDA
     is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
-    if is_ddp_requested and device_type == "cuda":
-        device = torch.device("cuda", ddp_local_rank)
-        torch.cuda.set_device(device)  # make "cuda" default to this device
-        dist.init_process_group(backend="nccl", device_id=device)
-        dist.barrier()
+    if is_ddp_requested:
+        if device_type != "cuda":
+            # DDP env variables are set (torchrun) but device is not CUDA.
+            # This silently disables DDP, which would give wrong results.
+            logger.warning(
+                "DDP requested (RANK/WORLD_SIZE set) but device_type='%s' is not CUDA. "
+                "DDP WILL NOT BE INITIALIZED. Running single-process only.",
+                device_type,
+            )
+            device = torch.device(device_type)
+        else:
+            device = torch.device("cuda", ddp_local_rank)
+            torch.cuda.set_device(device)  # make "cuda" default to this device
+            dist.init_process_group(backend="nccl", device_id=device)
+            dist.barrier()
     else:
         device = torch.device(device_type) # mps|cpu
 

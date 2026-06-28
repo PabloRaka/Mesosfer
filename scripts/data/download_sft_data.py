@@ -510,7 +510,7 @@ CONVERTERS = {
 # Download logic
 # =============================================================================
 
-def download_source(name: str, config: dict, hf_token: str | None = None) -> tuple[int, int]:
+def download_source(name: str, config: dict, hf_token: str | None = None, sample_10k: bool = False) -> tuple[int, int]:
     output_path = SFT_DIR / config["output_file"]
 
     if output_path.exists():
@@ -585,6 +585,9 @@ def download_source(name: str, config: dict, hf_token: str | None = None) -> tup
                 written += 1
                 char_count += sum(len(msg.get("content", "")) for msg in messages)
 
+                if sample_10k and int(char_count / 4.0) >= 10000:
+                    break
+
                 if written % 10_000 == 0:
                     logger.info(f"    {name}: {written:,} rows written...")
 
@@ -610,6 +613,8 @@ def main():
                         help="Specific sources to download (default: all)")
     parser.add_argument("--list", action="store_true",
                         help="List available sources and exit")
+    parser.add_argument("--sample-10k", action="store_true",
+                        help="Download a tiny 10,000-token sample of SFT datasets for fast testing")
     args = parser.parse_args()
 
     if args.list:
@@ -626,6 +631,10 @@ def main():
         hf_token = None
         logger.warning("⚠ No HF token — gated datasets will be skipped")
 
+    global SFT_DIR
+    if args.sample_10k:
+        SFT_DIR = _REPO_ROOT / "data" / "sft_sample"
+
     SFT_DIR.mkdir(parents=True, exist_ok=True)
 
     sources_to_run = args.sources if args.sources else list(SOURCES.keys())
@@ -640,7 +649,7 @@ def main():
 
     for name in sources_to_run:
         logger.info(f"\n[{name}]")
-        rows, tokens = download_source(name, SOURCES[name], hf_token)
+        rows, tokens = download_source(name, SOURCES[name], hf_token, sample_10k=args.sample_10k)
         total_written += rows
         total_tokens += tokens
         summary_stats.append((name, rows, tokens))

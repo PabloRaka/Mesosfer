@@ -379,11 +379,17 @@ class DistMuonAdamW(torch.optim.Optimizer):
                 param_infos[p] = dict(future=future, grad_slice=grad, is_small=True)
             else:
                 # Large params: reduce_scatter
-                assert grad.shape[0] % world_size == 0, f"AdamW reduce_scatter requires shape[0] ({grad.shape[0]}) divisible by world_size ({world_size})"
-                rank_size = grad.shape[0] // world_size
-                grad_slice = torch.empty_like(grad[:rank_size])
-                future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
-                param_infos[p] = dict(future=future, grad_slice=grad_slice, is_small=False)
+                # Guard: if shape[0] is not divisible by world_size, fall back to all_reduce
+                # to avoid crash when vocab_size or n_embd are not clean multiples.
+                if grad.shape[0] % world_size == 0:
+                    rank_size = grad.shape[0] // world_size
+                    grad_slice = torch.empty_like(grad[:rank_size])
+                    future = dist.reduce_scatter_tensor(grad_slice, grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
+                    param_infos[p] = dict(future=future, grad_slice=grad_slice, is_small=False)
+                else:
+                    # Fallback: all_reduce instead of reduce_scatter when indivisible.
+                    future = dist.all_reduce(grad, op=dist.ReduceOp.AVG, async_op=True).get_future()
+                    param_infos[p] = dict(future=future, grad_slice=grad, is_small=True)
         return dict(param_infos=param_infos)
 
     def _reduce_muon(self, group: dict, world_size: int) -> dict:
