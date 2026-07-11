@@ -2477,6 +2477,51 @@ def download_climbmix_shards(num_files, num_workers):
 
 
 # =============================================================================
+# =============================================================================
+# Helper functions for depth-based parameter scaling
+# =============================================================================
+
+def _get_vocab_size():
+    try:
+        base_dir = get_base_dir()
+        tokenizer_path = os.path.join(base_dir, "tokenizer", "tokenizer.json")
+        if os.path.exists(tokenizer_path):
+            with open(tokenizer_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                vocab = data.get("model", {}).get("vocab", {})
+                if vocab:
+                    return len(vocab)
+    except Exception:
+        pass
+    return 96000  # Default fallback
+
+
+def has_ve(layer_idx, n_layer, ve_layers=-1):
+    if ve_layers is None or ve_layers < 0:
+        return layer_idx % 2 == (n_layer - 1) % 2
+    return layer_idx < ve_layers or layer_idx == n_layer - 1
+
+
+def estimate_tokens_for_depth(depth, target_param_data_ratio=15, aspect_ratio=128, head_dim=128, ve_layers=-1):
+    vocab_size = _get_vocab_size()
+    padded_vocab_size = ((vocab_size + 63) // 64) * 64
+    
+    base_dim = depth * aspect_ratio
+    model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
+    num_heads = model_dim // head_dim
+    num_kv_head = num_heads
+    
+    num_layers_with_ve = sum(1 for i in range(depth) if has_ve(i, depth, ve_layers))
+    
+    transformer_matrices = 12 * model_dim * model_dim * depth + num_layers_with_ve * (12 * num_kv_head)
+    lm_head = padded_vocab_size * model_dim
+    num_scaling_params = transformer_matrices + lm_head
+    
+    target_tokens = int(target_param_data_ratio * num_scaling_params)
+    return target_tokens
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -2516,9 +2561,40 @@ def main():
                         help="Number of ClimbMix pretraining shards to download directly (e.g. 170)")
     parser.add_argument("--download-workers", type=int, default=4,
                         help="Number of parallel download workers (default: 4)")
+    parser.add_argument("--depth", type=int, default=None,
+                        help="Target Transformer depth to scale the dataset size to (e.g. 12, 16, 20, 24, 32)")
+    parser.add_argument("--target-param-data-ratio", type=float, default=15.0,
+                        help="Data-to-parameters ratio used to scale dataset size from depth (default: 15)")
+    # Shortcuts for specific depths as requested by the user
+    parser.add_argument("--12", dest="depth_12", action="store_true", help="Shortcut for --depth 12")
+    parser.add_argument("--16", dest="depth_16", action="store_true", help="Shortcut for --depth 16")
+    parser.add_argument("--20", dest="depth_20", action="store_true", help="Shortcut for --depth 20")
+    parser.add_argument("--24", dest="depth_24", action="store_true", help="Shortcut for --depth 24")
+    parser.add_argument("--32", dest="depth_32", action="store_true", help="Shortcut for --depth 32")
     parser.add_argument("--sample-10k", action="store_true",
                       help="Prepare a tiny 10,000-token sample of datasets for fast testing")
     args = parser.parse_args()
+
+    # Resolve depth shortcuts
+    if args.depth_12:
+        args.depth = 12
+    elif args.depth_16:
+        args.depth = 16
+    elif args.depth_20:
+        args.depth = 20
+    elif args.depth_24:
+        args.depth = 24
+    elif args.depth_32:
+        args.depth = 32
+
+    # Scale max_tokens based on depth if specified
+    if args.depth is not None:
+        target_tokens = estimate_tokens_for_depth(args.depth, target_param_data_ratio=args.target_param_data_ratio)
+        logger.info(f"Target depth {args.depth} specified. Calculated compute-optimal pretrain tokens: {target_tokens:,}")
+        if args.max_tokens is None:
+            args.max_tokens = target_tokens
+        else:
+            logger.info(f"Using explicitly requested --max-tokens={args.max_tokens:,} instead of depth-derived limit.")
 
     # Override defaults if `--sample-10k` is active
     if args.sample_10k:
@@ -2553,10 +2629,17 @@ def main():
     if not args.dry_run and not args.status:
         climbmix_dir = os.path.join(base_dir, "base_data_climbmix")
         existing_shards = [f for f in os.listdir(climbmix_dir) if f.endswith('.parquet')] if os.path.exists(climbmix_dir) else []
-        required_shards = 2 if args.sample_10k else 171
+        if args.sample_10k:
+            required_shards = 2
+        elif args.max_tokens is not None:
+            # Each shard is ~60M tokens. ClimbMix is ~1.5% of the dataset, but we allocate 5% buffer for variance.
+            climbmix_needed = int((args.max_tokens * 0.05) / 60_000_000)
+            required_shards = max(2, min(climbmix_needed + 2, 171))
+        else:
+            required_shards = 171
         if len(existing_shards) < required_shards:
             shards_to_download = required_shards - 1
-            logger.info(f"  ℹ️ ClimbMix general pretraining shards not found or incomplete. Downloading baseline {shards_to_download} shards automatically...")
+            logger.info(f"  ℹ️ ClimbMix general pretraining shards not found or incomplete (need {required_shards} shards). Downloading baseline {shards_to_download} shards automatically...")
             download_climbmix_shards(shards_to_download, args.download_workers)
 
     output_dir = os.path.join(base_dir, args.output_dir)

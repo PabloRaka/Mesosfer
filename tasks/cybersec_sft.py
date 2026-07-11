@@ -51,12 +51,20 @@ def _is_valid_conversation(messages) -> bool:
     Returns False if any message has a role other than user/assistant, or if the
     pattern doesn't alternate starting with user.
 
+    An optional leading system message is allowed (the tokenizer merges it into
+    the first user message via render_conversation).
+
     Assistant content may be a string (simple text) or a list of parts (tool
     calls using ``<|python_start|>`` / ``<|output_start|>`` / ``<|tool_start|>``
     tokens).  User content must always be a string.
     """
     if not isinstance(messages, list) or len(messages) < 2:
         return False
+    # Strip optional leading system message (tokenizer handles the merge)
+    if isinstance(messages[0], dict) and messages[0].get("role") == "system":
+        messages = messages[1:]
+        if len(messages) < 2:
+            return False
     for i, message in enumerate(messages):
         if not isinstance(message, dict):
             return False

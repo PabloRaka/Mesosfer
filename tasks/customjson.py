@@ -18,6 +18,8 @@ def _is_valid_conversation(messages) -> bool:
 
     - Must be a list of >= 2 message dicts with 'role' and 'content'.
     - Roles must alternate starting with 'user'.
+    - An optional leading system message is allowed (the tokenizer merges it
+      into the first user message via render_conversation).
     - User content must be a string.
     - Assistant content may be a string OR a list of part-dicts (tool calls), each
       with 'type' (in _VALID_PART_TYPES) and 'text'. This mirrors RobustCustomJSON
@@ -25,6 +27,11 @@ def _is_valid_conversation(messages) -> bool:
     """
     if not isinstance(messages, list) or len(messages) < 2:
         return False
+    # Strip optional leading system message (tokenizer handles the merge)
+    if isinstance(messages[0], dict) and messages[0].get("role") == "system":
+        messages = messages[1:]
+        if len(messages) < 2:
+            return False
     for i, message in enumerate(messages):
         if not isinstance(message, dict) or "role" not in message or "content" not in message:
             return False
