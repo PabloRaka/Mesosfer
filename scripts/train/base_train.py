@@ -82,6 +82,7 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=1000, help="save checkpoints every N steps (-1 = only at end). Default 1000 protects against crashes/preemption on cloud GPUs.")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+parser.add_argument("--tokenizer-dir", type=str, default=None, help="load tokenizer + token_bytes from this dir instead of <base_dir>/tokenizer (used by tokenizer BPB sweeps)")
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
@@ -128,8 +129,8 @@ else:
 
 # -----------------------------------------------------------------------------
 # Tokenizer will be useful for evaluation and also we need the vocab size to init the model
-tokenizer = get_tokenizer()
-token_bytes = get_token_bytes(device=device)
+tokenizer = get_tokenizer(tokenizer_dir=args.tokenizer_dir)
+token_bytes = get_token_bytes(device=device, tokenizer_dir=args.tokenizer_dir)
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
 
@@ -447,8 +448,8 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
-        with disable_fp8(model):
-            val_bpb, val_loss = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+        with disable_fp8(orig_model):
+            val_bpb, val_loss = evaluate_bpb(orig_model, val_loader, eval_steps, token_bytes)
         if master_process:
             tqdm.write(f"Step {step:05d} | Validation bpb: {val_bpb:.6f} | Val loss: {val_loss:.4f}")
         if val_bpb < min_val_bpb:

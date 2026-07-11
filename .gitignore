@@ -26,5 +26,8 @@ superpowers/specs/
 .vscode/
 .agents/
 
+# Local pre-change file backups (e.g. tokenizer sweep) — not for version control
+.backup/
+
 # RLHF collected feedback (runtime data, not for version control)
 data/rlhf/feedback.jsonl

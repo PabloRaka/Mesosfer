@@ -1,6 +1,13 @@
 """
 Evaluate compression ratio of the tokenizer.
+
+Default (no args): compare our tokenizer against GPT-2 and GPT-4.
+With --tokenizer-dirs A B C: rank candidate tokenizer directories by compression
+(used as the cheap pre-screen for the BPB sweep; see scripts/eval/tok_sweep.py).
 """
+
+import os
+import argparse
 
 from mesosfer.data.tokenizer import get_tokenizer, RustBPETokenizer
 from mesosfer.data.dataset import parquets_iter_batched
@@ -152,74 +159,66 @@ soc_log_text = r"""
 Between 03:14:22 and 03:14:48 UTC, internal host 10.10.24.57 generated 4 Suricata alerts (signature_id 2030011, "ET MALWARE Possible C2 Beaconing Activity", severity 1) targeting external IP 185.193.126.44 on TCP/443. The flow analysis showed periodic small-byte transfers (1244 bytes outbound, 1987 bytes inbound) with sub-second TLS handshakes, consistent with command-and-control beaconing rather than legitimate traffic. JA3 fingerprint 72a589da586844d7f0818ce684948eea matched known Cobalt Strike profiles. Concurrent DNS TXT queries for ajd82j3k2k2k.cmd-sync-storage.com (algorithmically generated subdomain pattern) returned base64-encoded answers — strong indicator of DNS tunneling exfiltration (MITRE ATT&CK T1071.004). Action taken: blackholed destination IP at perimeter firewall, queued endpoint for memory acquisition.
 """.strip()
 
-# The tokenizer was trained on data from earlier shards, so it has seen this data.
-# Guard against missing/unreadable parquet shards so the inline-text evaluation still runs.
-try:
-    train_docs = next(parquets_iter_batched(split="train"))
-    train_text = "\n".join(train_docs)
-except (StopIteration, FileNotFoundError, OSError) as e:
-    print(f"Warning: could not load train parquet shards ({type(e).__name__}: {e}); skipping fwe-train.")
-    train_text = ""
-try:
-    val_docs = next(parquets_iter_batched(split="val"))
-    val_text = "\n".join(val_docs)
-except (StopIteration, FileNotFoundError, OSError) as e:
-    print(f"Warning: could not load val parquet shards ({type(e).__name__}: {e}); skipping fwe-val.")
-    val_text = ""
+def build_eval_texts():
+    """Assemble the (name, text) domain probes plus, if available, one batch of
+    train/val parquet text. Guarded so missing shards don't break inline evaluation."""
+    # The tokenizer was trained on data from earlier shards, so it has seen train data.
+    try:
+        train_docs = next(parquets_iter_batched(split="train"))
+        train_text = "\n".join(train_docs)
+    except (StopIteration, FileNotFoundError, OSError) as e:
+        print(f"Warning: could not load train parquet shards ({type(e).__name__}: {e}); skipping fwe-train.")
+        train_text = ""
+    try:
+        val_docs = next(parquets_iter_batched(split="val"))
+        val_text = "\n".join(val_docs)
+    except (StopIteration, FileNotFoundError, OSError) as e:
+        print(f"Warning: could not load val parquet shards ({type(e).__name__}: {e}); skipping fwe-val.")
+        val_text = ""
 
-all_text = [
-    ("news", news_text),
-    ("indonesian", indonesian_text),
-    ("code", code_text),
-    ("math", math_text),
-    ("science", science_text),
-    ("cybersec", cybersec_text),
-    ("soc-log", soc_log_text),
-]
-if train_text:
-    all_text.append(("fwe-train", train_text))
-if val_text:
-    all_text.append(("fwe-val", val_text))
+    all_text = [
+        ("news", news_text),
+        ("indonesian", indonesian_text),
+        ("code", code_text),
+        ("math", math_text),
+        ("science", science_text),
+        ("cybersec", cybersec_text),
+        ("soc-log", soc_log_text),
+    ]
+    if train_text:
+        all_text.append(("fwe-train", train_text))
+    if val_text:
+        all_text.append(("fwe-val", val_text))
+    return all_text
 
-# Try out current default compared to GPT-2 and GPT-4 tokenizers
-tokenizer_results = {}
-vocab_sizes = {}
 
-for tokenizer_name in ["gpt2", "gpt4", "ours"]:
-
-    if tokenizer_name == "gpt2":
-        tokenizer = RustBPETokenizer.from_pretrained("gpt2") # gpt-2 base model tokenizer
-    elif tokenizer_name == "gpt4":
-        tokenizer = RustBPETokenizer.from_pretrained("cl100k_base") # gpt-4 base model tokenizer
-    else:
-        tokenizer = get_tokenizer()
-
-    vocab_sizes[tokenizer_name] = tokenizer.get_vocab_size()
-    tokenizer_results[tokenizer_name] = {}
-
+def measure_compression(tokenizer, all_text):
+    """Return {text_name: {bytes, tokens, ratio}} for one tokenizer. Asserts lossless round-trip."""
+    results = {}
     for name, text in all_text:
         encoded = tokenizer.encode(text)
         decoded = tokenizer.decode(encoded)
         assert decoded == text
-
         encoded_bytes = text.encode('utf-8')
-        ratio = len(encoded_bytes) / len(encoded)
-        tokenizer_results[tokenizer_name][name] = {
+        results[name] = {
             'bytes': len(encoded_bytes),
             'tokens': len(encoded),
-            'ratio': ratio
+            'ratio': len(encoded_bytes) / len(encoded),
         }
+    return results
+
+
+def overall_ratio(results):
+    """Byte-weighted overall bytes/token (higher = better compression)."""
+    total_bytes = sum(r['bytes'] for r in results.values())
+    total_tokens = sum(r['tokens'] for r in results.values())
+    return total_bytes / total_tokens
+
 
 # ANSI color codes
 GREEN = '\033[92m'
 RED = '\033[91m'
 RESET = '\033[0m'
-
-# Print vocab sizes
-print(f"\nVocab sizes:")
-print(f"GPT-2: {vocab_sizes['gpt2']}")
-print(f"GPT-4: {vocab_sizes['gpt4']}")
-print(f"Ours: {vocab_sizes['ours']}")
 
 def print_comparison(baseline_name, baseline_results, ours_results, all_text):
     """Print comparison table between baseline tokenizer and ours."""
@@ -259,28 +258,104 @@ def print_comparison(baseline_name, baseline_results, ours_results, all_text):
               f"{diff_color}{relative_diff:+7.1f}%{RESET}     "
               f"{better:<10}")
 
-# Print comparisons
-print_comparison("GPT-2", tokenizer_results['gpt2'], tokenizer_results['ours'], all_text)
-print_comparison("GPT-4", tokenizer_results['gpt4'], tokenizer_results['ours'], all_text)
+def _run_default():
+    """Original behavior: compare our tokenizer against GPT-2 and GPT-4."""
+    all_text = build_eval_texts()
+    tokenizer_results = {}
+    vocab_sizes = {}
+    for tokenizer_name in ["gpt2", "gpt4", "ours"]:
+        if tokenizer_name == "gpt2":
+            tokenizer = RustBPETokenizer.from_pretrained("gpt2")       # gpt-2 base model tokenizer
+        elif tokenizer_name == "gpt4":
+            tokenizer = RustBPETokenizer.from_pretrained("cl100k_base")  # gpt-4 base model tokenizer
+        else:
+            tokenizer = get_tokenizer()
+        vocab_sizes[tokenizer_name] = tokenizer.get_vocab_size()
+        tokenizer_results[tokenizer_name] = measure_compression(tokenizer, all_text)
 
-# Log to report
-from mesosfer.utils.report import get_report
-lines = []
-for baseline_name in ["GPT-2", "GPT-4"]:
-    baseline_key = baseline_name.lower().replace('-', '')
-    baseline_results = tokenizer_results[baseline_key]
-    ours_results = tokenizer_results['ours']
-    lines.append(f"### Comparison with {baseline_name}")
-    lines.append("")
-    lines.append("| Text Type | Bytes | " + baseline_name + " Tokens | " + baseline_name + " Ratio | Ours Tokens | Ours Ratio | Relative Diff % |")
-    lines.append("|-----------|-------|--------------|--------------|-------------|------------|-----------------|")
-    for name, text in all_text:
-        baseline_data = baseline_results[name]
-        ours_data = ours_results[name]
-        relative_diff = ((baseline_data['tokens'] - ours_data['tokens']) / baseline_data['tokens']) * 100
-        lines.append(f"| {name} | {baseline_data['bytes']} | {baseline_data['tokens']} | {baseline_data['ratio']:.2f} | {ours_data['tokens']} | {ours_data['ratio']:.2f} | {relative_diff:+.1f}% |")
-    lines.append("")
-report_markdown = "\n".join(lines)
-get_report().log(section="Tokenizer evaluation", data=[
-    report_markdown,
-])
+    print(f"\nVocab sizes:")
+    print(f"GPT-2: {vocab_sizes['gpt2']}")
+    print(f"GPT-4: {vocab_sizes['gpt4']}")
+    print(f"Ours: {vocab_sizes['ours']}")
+
+    print_comparison("GPT-2", tokenizer_results['gpt2'], tokenizer_results['ours'], all_text)
+    print_comparison("GPT-4", tokenizer_results['gpt4'], tokenizer_results['ours'], all_text)
+
+    # Log to report
+    from mesosfer.utils.report import get_report
+    lines = []
+    for baseline_name in ["GPT-2", "GPT-4"]:
+        baseline_key = baseline_name.lower().replace('-', '')
+        baseline_results = tokenizer_results[baseline_key]
+        ours_results = tokenizer_results['ours']
+        lines.append(f"### Comparison with {baseline_name}")
+        lines.append("")
+        lines.append("| Text Type | Bytes | " + baseline_name + " Tokens | " + baseline_name + " Ratio | Ours Tokens | Ours Ratio | Relative Diff % |")
+        lines.append("|-----------|-------|--------------|--------------|-------------|------------|-----------------|")
+        for name, text in all_text:
+            baseline_data = baseline_results[name]
+            ours_data = ours_results[name]
+            relative_diff = ((baseline_data['tokens'] - ours_data['tokens']) / baseline_data['tokens']) * 100
+            lines.append(f"| {name} | {baseline_data['bytes']} | {baseline_data['tokens']} | {baseline_data['ratio']:.2f} | {ours_data['tokens']} | {ours_data['ratio']:.2f} | {relative_diff:+.1f}% |")
+        lines.append("")
+    report_markdown = "\n".join(lines)
+    get_report().log(section="Tokenizer evaluation", data=[report_markdown])
+
+
+def _run_candidates(tokenizer_dirs):
+    """Rank candidate tokenizer directories by compression. Returns rows sorted best-first.
+    Used as the cheap pre-screen for the BPB sweep."""
+    all_text = build_eval_texts()
+    rows = []
+    for d in tokenizer_dirs:
+        tokenizer = RustBPETokenizer.from_directory(d)
+        results = measure_compression(tokenizer, all_text)
+        rows.append({
+            'name': os.path.basename(os.path.normpath(d)),
+            'dir': d,
+            'vocab': tokenizer.get_vocab_size(),
+            'overall': overall_ratio(results),
+            'results': results,
+        })
+    rows.sort(key=lambda r: r['overall'], reverse=True)  # best compression first
+
+    print("\nCandidate tokenizer compression (byte-weighted bytes/token; higher = better):")
+    print("=" * 72)
+    print(f"{'Rank':<5}{'Candidate':<28}{'Vocab':<10}{'Overall':<12}")
+    print("-" * 72)
+    for i, r in enumerate(rows, 1):
+        color = GREEN if i == 1 else ""
+        print(f"{i:<5}{color}{r['name']:<28}{RESET}{r['vocab']:<10}{r['overall']:<12.4f}")
+
+    domain_names = [n for n, _ in all_text]
+    print("\nPer-domain ratio:")
+    header = f"{'Candidate':<28}" + "".join(f"{n[:9]:<10}" for n in domain_names)
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        print(f"{r['name']:<28}" + "".join(f"{r['results'][n]['ratio']:<10.2f}" for n in domain_names))
+
+    from mesosfer.utils.report import get_report
+    lines = ["### Candidate tokenizer compression pre-screen", "",
+             "| Rank | Candidate | Vocab | Overall bytes/token |",
+             "|------|-----------|-------|---------------------|"]
+    for i, r in enumerate(rows, 1):
+        lines.append(f"| {i} | {r['name']} | {r['vocab']} | {r['overall']:.4f} |")
+    get_report().log(section="Tokenizer evaluation", data=["\n".join(lines)])
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate tokenizer compression ratio")
+    parser.add_argument("--tokenizer-dirs", nargs="+", default=None,
+                        help="Rank these candidate tokenizer directories by compression (BPB sweep pre-screen). "
+                             "If omitted, compare our default tokenizer against GPT-2 and GPT-4.")
+    args = parser.parse_args()
+    if args.tokenizer_dirs:
+        _run_candidates(args.tokenizer_dirs)
+    else:
+        _run_default()
+
+
+if __name__ == "__main__":
+    main()

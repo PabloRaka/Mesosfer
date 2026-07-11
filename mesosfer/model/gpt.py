@@ -512,15 +512,19 @@ class GPT(nn.Module):
             # vocab mismatch — fail fast. (The previous code clamped to [0, vocab_size),
             # which silently turned every -1 into token 0 and DESTROYED the loss mask.)
             vocab_size = self.config.vocab_size
-            t_max = targets.max().item()
-            t_min = targets.min().item()
-            if t_max >= vocab_size or t_min < -1:
-                raise ValueError(
-                    f"Target token ids out of range: min={t_min}, max={t_max}. "
-                    f"Valid values are -1 (ignore_index) or [0, {vocab_size}). "
-                    f"This means the tokenizer vocabulary does not match the model's "
-                    f"vocab_size — retrain the tokenizer/model with matching vocab."
-                )
+            # ponytail: guard skips .item() calls during torch.compile tracing
+            # to avoid CPU-GPU sync graph breaks every forward pass.
+            # The check still runs in eager mode (first few steps, eval, debug).
+            if not torch.compiler.is_compiling():
+                t_max = targets.max().item()
+                t_min = targets.min().item()
+                if t_max >= vocab_size or t_min < -1:
+                    raise ValueError(
+                        f"Target token ids out of range: min={t_min}, max={t_max}. "
+                        f"Valid values are -1 (ignore_index) or [0, {vocab_size}). "
+                        f"This means the tokenizer vocabulary does not match the model's "
+                        f"vocab_size — retrain the tokenizer/model with matching vocab."
+                    )
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:

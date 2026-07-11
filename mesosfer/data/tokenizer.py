@@ -185,13 +185,17 @@ class RustBPETokenizer:
         self.bos_token_id = self.encode_special(bos_token)
 
     @classmethod
-    def train_from_iterator(cls, text_iterator, vocab_size):
+    def train_from_iterator(cls, text_iterator, vocab_size, pattern=None):
         # 1) train using rustbpe
+        # `pattern` is the pre-tokenization split regex; default to the module SPLIT_PATTERN.
+        # Overridable so a sweep can A/B alternate pre-tokenizers (e.g. number grouping).
+        if pattern is None:
+            pattern = SPLIT_PATTERN
         tokenizer = rustbpe.Tokenizer()
         # the special tokens are inserted later in __init__, we don't train them here
         vocab_size_no_special = vocab_size - len(SPECIAL_TOKENS)
         assert vocab_size_no_special >= 256, f"vocab_size_no_special must be at least 256, got {vocab_size_no_special}"
-        tokenizer.train_from_iterator(text_iterator, vocab_size_no_special, pattern=SPLIT_PATTERN)
+        tokenizer.train_from_iterator(text_iterator, vocab_size_no_special, pattern=pattern)
         # 2) construct the associated tiktoken encoding for inference
         pattern = tokenizer.get_pattern()
         mergeable_ranks_list = tokenizer.get_mergeable_ranks()
@@ -417,18 +421,27 @@ class RustBPETokenizer:
 # -----------------------------------------------------------------------------
 # mesosfer-specific convenience functions
 
-def get_tokenizer():
+def _resolve_tokenizer_dir(tokenizer_dir=None):
+    # Resolution order: explicit arg > env MESOSFER_TOKENIZER_DIR > base_dir/tokenizer.
+    # This lets a sweep point training/eval at a specific candidate tokenizer without
+    # disturbing the default location.
+    if tokenizer_dir is not None:
+        return tokenizer_dir
+    env_dir = os.environ.get("MESOSFER_TOKENIZER_DIR")
+    if env_dir:
+        return env_dir
     from mesosfer.utils.common import get_base_dir
     base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    return os.path.join(base_dir, "tokenizer")
+
+def get_tokenizer(tokenizer_dir=None):
+    tokenizer_dir = _resolve_tokenizer_dir(tokenizer_dir)
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
     return RustBPETokenizer.from_directory(tokenizer_dir)
 
-def get_token_bytes(device="cpu"):
+def get_token_bytes(device="cpu", tokenizer_dir=None):
     import torch
-    from mesosfer.utils.common import get_base_dir
-    base_dir = get_base_dir()
-    tokenizer_dir = os.path.join(base_dir, "tokenizer")
+    tokenizer_dir = _resolve_tokenizer_dir(tokenizer_dir)
     token_bytes_path = os.path.join(tokenizer_dir, "token_bytes.pt")
     assert os.path.exists(token_bytes_path), f"Token bytes not found at {token_bytes_path}? It gets written by tok_train.py"
     with open(token_bytes_path, "rb") as f:
