@@ -463,7 +463,6 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "zeek_scripts":            1.5,
     "brightdata_cybersec":     2.0,  # Real-time threat intel via BrightData Proxy/API
     "primus_seed":             2.2,  # Trend Micro curated cybersecurity seed corpus
-    "primus_reasoning":        2.0,  # Cybersecurity chain-of-thought reasoning
     # General knowledge — retained but capped so it supports broad ability (~10%)
     "climbmix":                0.6,  # very large, keep proportion down
     "wikipedia":               0.5,  # huge corpus, don't let it dominate
@@ -786,15 +785,9 @@ DATASET_SOURCES = {
     "streaming": True,
 },
 
-"primus_reasoning": {
-    "hf_name": "trendmicro-ailab/Primus-Reasoning",
-    "description": "Cybersecurity chain-of-thought reasoning distilled from o1-preview and DeepSeek-R1",
-    "category": "cybersecurity",
-    "max_tokens": 1_500_000_000,
-    "text_column": "text",
-    "split": "train",
-    "streaming": True,
-},
+# NOTE: primus_reasoning (trendmicro-ailab/Primus-Reasoning) is a chain-of-thought
+# REASONING dataset (post-training), not a pretraining corpus. It lives in
+# scripts/data/download_sft_data.py under the "primus_reasoning" SFT source.
 
 "brightdata_cybersec": {
     "source_type": "brightdata_scraper",
