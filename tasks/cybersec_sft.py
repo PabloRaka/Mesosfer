@@ -7,20 +7,33 @@ the SFT training pipeline alongside SmolTalk, MMLU, GSM8K, etc.
 Each file in data/sft/ follows the same format as identity_conversations.jsonl:
 each line is a JSON array of {"role": ..., "content": ...} message objects.
 
-Some files (mythos_combined, multi_turn_soc) contain `tool` role messages that
-are not part of mesosfer's expected user/assistant alternation. These conversations
-are filtered out with a single warning per file rather than crashing the pipeline.
+Conversations that do not match the user/assistant alternation are skipped with a
+single warning per file rather than crashing the pipeline (see RobustCustomJSON).
+
+Row counts below are post-dedup. Several files shipped with heavy internal
+duplication (cyber_defensive was 5000 rows but only 120 unique, i.e. every example
+repeated ~42x). Duplicates were removed so that repetition is expressed through the
+`*_epochs` knobs instead — visible in the config rather than hidden in the data.
+Epochs are chosen to keep each unique example under ~8 exposures per run.
 
 Available datasets:
-  - mesosfer_validation_conversations.jsonl  (300 rows, ID + EN variants)
-  - cloud_security_sft.jsonl                 (6 rows)
-  - cyber_defensive_conversations.jsonl      (5000 rows, ID + EN variants)
-  - identity_conversations.jsonl             (1000 rows, ID + EN variants)
-  - multi_turn_soc_sft.jsonl                 (4 rows, some skipped due to tool role)
-  - mythos_combined_sft.jsonl                (110 rows, ~59 skipped due to tool role)
+  - cyber_defensive_conversations.jsonl      (96 rows, ID + EN variants)
+  - mesosfer_validation_conversations.jsonl  (24 ID / 32 EN — HELD-OUT, epochs=0, never trained)
+  - cloud_security_sft.jsonl                 (6 rows, ID + EN variants)
+  - identity_conversations.jsonl             (747 rows, ID + EN variants)
+  - multi_turn_soc_sft.jsonl                 (4 rows — DISABLED, epochs=0: the `tool` and
+                                              `assistant` turns are mislabelled user input,
+                                              so there are no real assistant answers to learn)
+  - mythos_combined_sft.jsonl                (55 rows, ID + EN — multi-step tool use; the
+                                              `tool` role was converted to tool/tool_output
+                                              parts and tool calls normalised to
+                                              {"name":"shell","arguments":{"command":...}})
+  - mythos_tool_calling.jsonl                (110 rows, ID + EN variants)
   - tool_oriented_cyber_sft.jsonl            (8 rows)
-  - tool_calling_conversations_en.jsonl      (tool-calling SFT with <|calc_start|> tokens)
+  - tool_calling_conversations_en.jsonl      (122 rows, calc/tool parts)
   - gemini_teacher_conversations.jsonl       (373 rows)
+  - alpaca_indonesian_sft.jsonl              (45626 rows — general Indonesian instruction;
+                                              dominates the mix at ~1 epoch, see README)
 """
 
 import json
@@ -335,14 +348,14 @@ class XLAMFunctionCalling(RobustCustomJSON):
 # Mixture builders
 
 def build_cybersec_sft_tasks(
-    cyber_defensive_epochs: int = 1,
-    cloud_security_epochs: int = 20,
-    multi_turn_soc_epochs: int = 30,
-    tool_oriented_epochs: int = 20,
-    tool_calling_epochs: int = 15,
-    mythos_epochs: int = 4,
+    cyber_defensive_epochs: int = 8,
+    cloud_security_epochs: int = 8,
+    multi_turn_soc_epochs: int = 0,
+    tool_oriented_epochs: int = 8,
+    tool_calling_epochs: int = 8,
+    mythos_epochs: int = 8,
     mythos_tool_calling_epochs: int = 4,
-    mesosfer_validation_epochs: int = 2,
+    mesosfer_validation_epochs: int = 0,
     gemini_teacher_epochs: int = 2,
     primus_instruct_epochs: int = 1,
     primus_reasoning_epochs: int = 1,
