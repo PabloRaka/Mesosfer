@@ -267,7 +267,7 @@ dependency on Llama-3 / OpenAI tool formats):
 
 | Token pair | Meaning | Supervised? |
 | :--- | :--- | :--- |
-| `<\|python_start\|>` … `<\|python_end\|>` | Built-in Python REPL/calculator (executed by the engine at inference) | yes |
+| `<\|calc_start\|>` … `<\|calc_end\|>` | Inline expression evaluator — arithmetic and simple string ops, run by the engine at inference (not a Python REPL) | yes |
 | `<\|tool_start\|>` … `<\|tool_end\|>` | Generic named tool call. Payload is JSON `{"name": ..., "arguments": {...}}` — covers shell, network scanners, SQL, HTTP, etc. | yes |
 | `<\|output_start\|>` … `<\|output_end\|>` | Tool / REPL result returned from the environment | no (not supervised) |
 

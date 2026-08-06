@@ -9,7 +9,7 @@ from tasks.common import Task
 
 
 # Part types allowed inside a list-form assistant message (tool-calling SFT).
-_VALID_PART_TYPES = ("text", "python", "python_output", "tool", "tool_output")
+_VALID_PART_TYPES = ("text", "calc", "calc_output", "tool", "tool_output")
 
 
 def _is_valid_conversation(messages) -> bool:
