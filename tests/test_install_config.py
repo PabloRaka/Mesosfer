@@ -1,3 +1,4 @@
+import re
 import tomllib
 from pathlib import Path
 
@@ -69,3 +70,19 @@ def test_torch_install_extras_conflict_with_each_other():
         {"extra": "gpu"},
         {"extra": "rocm"},
     ] in conflicts
+
+
+def test_rocm_extra_declares_triton_directly():
+    """triton must be a direct dependency of the rocm extra, not left to torch.
+
+    uv only consults [tool.uv.sources] for the project's direct dependencies. As a
+    transitive dependency of torch, triton-rocm never reaches the explicit=true ROCm
+    index, and `uv sync --extra rocm` fails with "no version of triton-rocm==3.6.0"
+    even though the wheel exists in that index.
+    """
+    config = _pyproject()
+    rocm = config["project"]["optional-dependencies"]["rocm"]
+    names = [re.split(r"[<>=;\[ ]", req.strip())[0] for req in rocm]
+
+    assert "triton-rocm" in names, f"rocm extra must list triton-rocm directly, got {rocm}"
+    assert any(s.get("index") == "pytorch-rocm" for s in config["tool"]["uv"]["sources"]["triton-rocm"])
