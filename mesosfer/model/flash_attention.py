@@ -59,6 +59,13 @@ def _load_flash_attention_2():
     """Try to load Flash Attention 2 from the optional flash-attn package."""
     if not torch.cuda.is_available():
         return None
+    if _is_rocm():
+        # flash-attn picks its backend at import time from this env var. Unset, its
+        # flash_attn_interface does `import flash_attn_2_cuda`, which does not exist in
+        # a ROCm build — the ImportError is swallowed below and we silently fall back to
+        # SDPA even though flash-attn is installed. setdefault so an explicit
+        # FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE (e.g. to test the CK backend) still wins.
+        os.environ.setdefault("FLASH_ATTENTION_TRITON_AMD_ENABLE", "TRUE")
     try:
         try:
             from flash_attn import flash_attn_func, flash_attn_with_kvcache

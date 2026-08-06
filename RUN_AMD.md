@@ -108,8 +108,24 @@ uv sync --extra rocm --no-build-isolation
 
 ```bash
 # Flash Attention 2 for ROCm (faster than the SDPA fallback; optional)
-uv pip install flash-attn --no-build-isolation
+# The env var selects the Triton AMD backend. Without it the build targets CUDA and
+# the install "succeeds", but importing it raises
+# ModuleNotFoundError: No module named 'flash_attn_2_cuda' and mesosfer silently
+# falls back to SDPA. Activate the venv first, or uv installs into the wrong place.
+source .venv/bin/activate
+FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE uv pip install flash-attn --no-build-isolation
 ```
+
+Verify it is actually picked up (mesosfer sets the same env var internally at import,
+so this should report `fa2` without you exporting anything):
+
+```bash
+python -c "from mesosfer.model.flash_attention import ATTENTION_BACKEND; print(ATTENTION_BACKEND)"
+```
+
+> **FlashAttention-3 is not available on AMD.** Upstream states it requires an
+> H100/H800 with CUDA >= 12.3 — it relies on Hopper-only instructions. `fa2` is the
+> ceiling on MI300X, and `_load_flash_attention_3()` returns early on ROCm by design.
 
 > **Why `--no-build-isolation`?** `flash-attn` compiles against the ROCm torch
 > headers of the torch that is already installed. Without the flag, pip would set
