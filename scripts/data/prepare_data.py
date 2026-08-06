@@ -2514,6 +2514,10 @@ def estimate_tokens_for_depth(depth, target_param_data_ratio=15, aspect_ratio=12
     return target_tokens
 
 
+# Depths that get a CLI shortcut (--12 / --d12 etc). Any other depth still works via --depth N.
+DEPTH_SHORTCUTS = (12, 16, 20, 24, 32)
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -2558,32 +2562,36 @@ def main():
                         help="Target Transformer depth to scale the dataset size to (e.g. 12, 16, 20, 24, 32)")
     parser.add_argument("--target-param-data-ratio", type=float, default=15.0,
                         help="Data-to-parameters ratio used to scale dataset size from depth (default: 15)")
-    # Shortcuts for specific depths as requested by the user
-    parser.add_argument("--12", dest="depth_12", action="store_true", help="Shortcut for --depth 12")
-    parser.add_argument("--16", dest="depth_16", action="store_true", help="Shortcut for --depth 16")
-    parser.add_argument("--20", dest="depth_20", action="store_true", help="Shortcut for --depth 20")
-    parser.add_argument("--24", dest="depth_24", action="store_true", help="Shortcut for --depth 24")
-    parser.add_argument("--32", dest="depth_32", action="store_true", help="Shortcut for --depth 32")
+    # model_dim = depth x aspect_ratio, so this shifts the token target by ~4x between 64 and 128.
+    # It MUST match the --aspect-ratio you later pass to base_train, or the dataset is sized for a
+    # different model than the one you train (i.e. exactly the over/under-training this flag prevents).
+    parser.add_argument("--aspect-ratio", type=int, default=128,
+                        help="Model dim = depth x aspect-ratio; must match base_train (default: 128)")
+    # Shortcuts for specific depths: both --12 and --d12 map to --depth 12
+    for _d in DEPTH_SHORTCUTS:
+        parser.add_argument(f"--{_d}", f"--d{_d}", dest=f"depth_{_d}", action="store_true",
+                            help=f"Shortcut for --depth {_d}")
     parser.add_argument("--sample-10k", action="store_true",
                       help="Prepare a tiny 10,000-token sample of datasets for fast testing")
     args = parser.parse_args()
 
     # Resolve depth shortcuts
-    if args.depth_12:
-        args.depth = 12
-    elif args.depth_16:
-        args.depth = 16
-    elif args.depth_20:
-        args.depth = 20
-    elif args.depth_24:
-        args.depth = 24
-    elif args.depth_32:
-        args.depth = 32
+    for _d in DEPTH_SHORTCUTS:
+        if getattr(args, f"depth_{_d}"):
+            args.depth = _d
+            break
 
     # Scale max_tokens based on depth if specified
     if args.depth is not None:
-        target_tokens = estimate_tokens_for_depth(args.depth, target_param_data_ratio=args.target_param_data_ratio)
-        logger.info(f"Target depth {args.depth} specified. Calculated compute-optimal pretrain tokens: {target_tokens:,}")
+        target_tokens = estimate_tokens_for_depth(
+            args.depth,
+            target_param_data_ratio=args.target_param_data_ratio,
+            aspect_ratio=args.aspect_ratio,
+        )
+        logger.info(
+            f"Target depth {args.depth} (aspect-ratio {args.aspect_ratio}, ratio {args.target_param_data_ratio:g}). "
+            f"Calculated compute-optimal pretrain tokens: {target_tokens:,}"
+        )
         if args.max_tokens is None:
             args.max_tokens = target_tokens
         else:
