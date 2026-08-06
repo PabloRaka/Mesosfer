@@ -56,15 +56,15 @@ torch = [
 # either torch generation resolves; the index is explicit=true, so an unmapped name
 # fails with "no version of triton-rocm" instead of falling back to PyPI.
 #
-# No `extra = "rocm"` here on purpose: uv requires that a source carrying an extra
-# also be listed in project.optional-dependencies for that extra, and these are
-# transitive deps of torch, not direct ones. Leaving the extra off makes the mapping
-# unconditional, which is harmless because only ROCm torch ever requests these names.
+# triton-rocm carries extra = "rocm" because it is a direct dependency of that extra
+# (see the comment there). pytorch-triton-rocm stays extra-less: it is only relevant to
+# ROCm 6.x hosts that repoint the index, and uv rejects an extra on a package that is
+# not listed under that extra.
 pytorch-triton-rocm = [
     { index = "pytorch-rocm" },
 ]
 triton-rocm = [
-    { index = "pytorch-rocm" },
+    { index = "pytorch-rocm", extra = "rocm" },
 ]
 
 [[tool.uv.index]]
@@ -94,9 +94,13 @@ gpu = [
     "torch>=2.6.0,<3.0",
 ]
 rocm = [
-    # triton is pulled in by torch itself, under whichever name that torch version uses
-    # (see the sources note above). Pinning it here would force one of the two names.
     "torch>=2.6.0,<3.0",
+    # Must be listed explicitly, not left to torch. [tool.uv.sources] is only consulted
+    # for the project's *direct* dependencies, so as a transitive dep of torch this name
+    # never reaches the ROCm index (which is explicit=true) and resolution dies with
+    # "no version of triton-rocm==3.6.0". Naming it here makes the mapping apply.
+    # torch >=2.11 requires this name; on a ROCm 6.x index it is pytorch-triton-rocm instead.
+    "triton-rocm>=3.6.0 ; sys_platform == 'linux'",
 ]
 
 [tool.uv]
