@@ -306,6 +306,36 @@ class OpenThoughtsSFT(RobustCustomJSON):
         super().__init__(filepath=_sft_path("open_thoughts_sft.jsonl", sft_dir), **kwargs)
 
 
+class HermesFuncCallingSFT(RobustCustomJSON):
+    """Hermes multi-turn function calling. Ungated counterpart to the gated xLAM set."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("hermes_func_calling_sft.jsonl", sft_dir), **kwargs)
+
+
+class HermesGlaiveFuncCallingSFT(RobustCustomJSON):
+    """Glaive function calling, cleaned into ShareGPT turns by Nous."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("hermes_glaive_func_calling_sft.jsonl", sft_dir), **kwargs)
+
+
+class KimiK3TracesSFT(RobustCustomJSON):
+    """Kimi K3 agentic coding/debugging trajectories (multi-step tool use). ~4K rows."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("kimi_k3_traces_sft.jsonl", sft_dir), **kwargs)
+
+
+class CoTCollectionSFT(RobustCustomJSON):
+    """CoT Collection chain-of-thought rationales across many NLP tasks."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("cot_collection_sft.jsonl", sft_dir), **kwargs)
+
+
+class QyrouReasoningSFT(RobustCustomJSON):
+    """Reasoning corpus distilled from frontier models (explicit thought traces)."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("qyrou_reasoning_sft.jsonl", sft_dir), **kwargs)
+
+
 class NistCybersecSFT(RobustCustomJSON):
     """NIST cybersecurity training conversations. ~50K rows."""
     def __init__(self, sft_dir=None, **kwargs):
@@ -368,6 +398,11 @@ def build_cybersec_sft_tasks(
     competition_math_epochs: int = 2,
     magpie_reasoning_epochs: int = 1,
     open_thoughts_epochs: int = 1,
+    hermes_func_calling_epochs: int = 2,
+    hermes_glaive_func_calling_epochs: int = 1,
+    kimi_k3_traces_epochs: int = 4,
+    cot_collection_epochs: int = 1,
+    qyrou_reasoning_epochs: int = 1,
     nist_cybersec_epochs: int = 1,
     fenrir_v2_epochs: int = 1,
     code_feedback_epochs: int = 1,
@@ -455,6 +490,16 @@ def build_cybersec_sft_tasks(
         tasks.append(MagpieReasoningSFT(sft_dir=sft_dir))
     for _ in range(open_thoughts_epochs):
         tasks.append(OpenThoughtsSFT(sft_dir=sft_dir))
+    for _ in range(hermes_func_calling_epochs):
+        tasks.append(HermesFuncCallingSFT(sft_dir=sft_dir))
+    for _ in range(hermes_glaive_func_calling_epochs):
+        tasks.append(HermesGlaiveFuncCallingSFT(sft_dir=sft_dir))
+    for _ in range(kimi_k3_traces_epochs):
+        tasks.append(KimiK3TracesSFT(sft_dir=sft_dir))
+    for _ in range(cot_collection_epochs):
+        tasks.append(CoTCollectionSFT(sft_dir=sft_dir))
+    for _ in range(qyrou_reasoning_epochs):
+        tasks.append(QyrouReasoningSFT(sft_dir=sft_dir))
     for _ in range(nist_cybersec_epochs):
         tasks.append(NistCybersecSFT(sft_dir=sft_dir))
     for _ in range(fenrir_v2_epochs):
