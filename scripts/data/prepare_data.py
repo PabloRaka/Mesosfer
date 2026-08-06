@@ -467,6 +467,10 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "climbmix":                0.6,  # very large, keep proportion down
     "wikipedia":               0.5,  # huge corpus, don't let it dominate
     "fineweb_edu":             0.7,
+    # Indonesian — same tier as English general knowledge. Kept low on purpose: weight controls
+    # how often a domain appears in mixed shards, and bursty language switches cause loss spikes.
+    "wikipedia_id":            0.5,
+    "fineweb2_id":             0.6,
     # Code — important for secure coding (~30% effective share)
     "secure_code_python":      1.4,
     "secure_code_c":           1.4,
@@ -623,6 +627,30 @@ DATASET_SOURCES = {
         "split": "train",
         "streaming": True,
         "hf_subset": "sample-10BT",
+    },
+    # Indonesian foundation. Deliberately small (~3.2B, ~3% of the mix): enough to give the
+    # 96K tokenizer real Indonesian sub-words and to ground the base model, without displacing
+    # the cybersecurity/English budget. Indonesian SFT (data/sft/*.jsonl) builds on top of this —
+    # SFT alone cannot teach a language the base model never saw.
+    "wikipedia_id": {
+        "hf_name": "wikimedia/wikipedia",
+        "description": "Indonesian Wikipedia articles",
+        "category": "general",
+        "max_tokens": 200_000_000,
+        "text_column": "text",
+        "split": "train",
+        "streaming": True,
+        "hf_subset": "20231101.id",
+    },
+    "fineweb2_id": {
+        "hf_name": "HuggingFaceFW/fineweb-2",
+        "description": "Indonesian web text, FineWeb-2 filtering pipeline",
+        "category": "general",
+        "max_tokens": 3_000_000_000,
+        "text_column": "text",
+        "split": "train",
+        "streaming": True,
+        "hf_subset": "ind_Latn",
     },
 "secure_code_python": {
     "hf_name": "bigcode/the-stack-dedup",

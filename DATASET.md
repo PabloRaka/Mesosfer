@@ -14,9 +14,9 @@ stages of **mesosfer**, kept in sync with the source of truth in code:
 
 | Mode                                             | Scaling Params | Ratio | Tokens Needed | Tokens Available | Status              |
 | :------------------------------------------------- | :--------------- | :------ | :-------------- | :----------------- | :-------------------- |
-| Speedrun (`--target-param-data-ratio=10`)        | ~6.8B          | 10×  | ~68B          | ~100B            | ✅ surplus          |
-| Recommended (`--target-param-data-ratio=15`)     | ~6.8B          | 15×  | ~103B         | ~100B            | ✅ ~covered (marginal) |
-| Compute-optimal (`--target-param-data-ratio=18`) | ~6.8B          | 18×  | ~123B         | ~100B            | ⚠️ under            |
+| Speedrun (`--target-param-data-ratio=10`)        | ~6.8B          | 10×  | ~68B          | ~103B            | ✅ surplus          |
+| Recommended (`--target-param-data-ratio=15`)     | ~6.8B          | 15×  | ~103B         | ~103B            | ✅ ~covered (marginal) |
+| Compute-optimal (`--target-param-data-ratio=18`) | ~6.8B          | 18×  | ~123B         | ~103B            | ⚠️ under            |
 
 > **Depth 32 config:** `n_embd = 32 × 128 = 4096`, **96K vocab**, ~13.7B total params (legacy VE; ~9.3B with `--ve-layers=4`), ~6.8B scaling params (transformer matrices + lm_head, excl. embeddings).
 > Recommended: `--depth=32 --target-param-data-ratio=10` (~68B, comfortable surplus) or `=15` (~103B, marginal). Use `--ve-layers=4 --grad-checkpoint` to cut memory.
@@ -29,8 +29,10 @@ stages of **mesosfer**, kept in sync with the source of truth in code:
 | Cybersecurity    | ~37.1B      | ~37%  |
 | Code             | ~30.1B      | ~30%  |
 | Reasoning / Math | ~21.0B      | ~21%  |
-| General          | ~12.0B      | ~12%  |
-| **Total**        | **~100.2B** | 100%  |
+| General          | ~15.2B      | ~15%  |
+| **Total**        | **~103.4B** | 100%  |
+
+> General includes ~3.2B Indonesian (`fineweb2_id`, `wikipedia_id`); the rest is English.
 
 ---
 
@@ -103,8 +105,17 @@ bound on volume per source.
 | `fineweb_edu`               | General       | 0.7    | 4.0B       | `HuggingFaceFW/fineweb-edu` (`sample-10BT`) | Educational web content.                 |
 | `climbmix`                  | General       | 0.6    | 5.0B       | `karpathy/climbmix-400b-shuffle`            | General pretraining, suppressed.         |
 | `wikipedia`                 | General       | 0.5    | 3.0B       | `wikimedia/wikipedia` (`20231101.en`)       | English Wikipedia, suppressed.           |
+| `fineweb2_id`               | General       | 0.6    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
+| `wikipedia_id`              | General       | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
 
-> **46 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
+> **48 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
+
+> 🇮🇩 **Indonesian in pretraining:** `fineweb2_id` + `wikipedia_id` contribute ~3.2B tokens (~3% of the
+> mix). This is deliberately small — it exists so the 96K tokenizer learns real Indonesian sub-words and
+> the base model has a language foundation to build on. The Indonesian SFT sets (Section 3) sit on top of
+> it; SFT alone cannot teach a language the base model never saw during pretraining. Weights are kept at
+> the general-knowledge tier (0.5–0.6) because weight controls how often a domain appears in mixed
+> shards, and bursty language switching is a known loss-spike source.
 
 > ⚠️ **Loss-spike prevention:** Raw logs (`.log`, `.xml`, `.json`) are converted to natural-language
 > narratives by `convert_logs_to_nl.py` before pretraining:
