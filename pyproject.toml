@@ -3,7 +3,10 @@ name = "mesosfer"
 version = "0.1.0"
 description = "the minimal full-stack ChatGPT clone"
 readme = "README.md"
-requires-python = ">=3.12"
+# Upper bound is deliberate: uv solves every Python version in this range, and the
+# ROCm/CUDA wheel indexes have no 3.14+ builds yet, so leaving it open makes
+# `uv sync --extra rocm` fail on a split that nobody actually installs into.
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.117.1",
@@ -48,7 +51,14 @@ torch = [
     { index = "pytorch-cu128", extra = "gpu" },
     { index = "pytorch-rocm", extra = "rocm" },
 ]
+# torch renamed its ROCm triton dependency at 2.11: <=2.10 pulls pytorch-triton-rocm
+# (index stops at 3.5.1), >=2.11 pulls triton-rocm (3.6.0+). Both names are mapped so
+# either torch generation resolves; the index is explicit=true, so an unmapped name
+# fails with "no version of triton-rocm" instead of falling back to PyPI.
 pytorch-triton-rocm = [
+    { index = "pytorch-rocm", extra = "rocm" },
+]
+triton-rocm = [
     { index = "pytorch-rocm", extra = "rocm" },
 ]
 
@@ -79,8 +89,9 @@ gpu = [
     "torch>=2.6.0,<3.0",
 ]
 rocm = [
+    # triton is pulled in by torch itself, under whichever name that torch version uses
+    # (see the sources note above). Pinning it here would force one of the two names.
     "torch>=2.6.0,<3.0",
-    "pytorch-triton-rocm>=3.1.0",
 ]
 
 [tool.uv]

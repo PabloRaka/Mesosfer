@@ -14,7 +14,11 @@ def test_torch_install_extras_include_cuda_and_rocm():
 
     assert "cuda" in extras
     assert "rocm" in extras
-    assert "pytorch-triton-rocm>=3.1.0" in extras["rocm"]
+    # Both triton spellings must be mapped: torch <=2.10 needs pytorch-triton-rocm,
+    # torch >=2.11 needs triton-rocm, and the index is explicit=true so an unmapped
+    # name cannot resolve at all.
+    assert "triton-rocm" in config["tool"]["uv"]["sources"]
+    assert "pytorch-triton-rocm" in config["tool"]["uv"]["sources"]
     assert any(source.get("extra") == "cuda" and source.get("index") == "pytorch-cu128" for source in sources)
     assert any(source.get("extra") == "rocm" and source.get("index") == "pytorch-rocm" for source in sources)
     assert any(source.get("extra") == "rocm" and source.get("index") == "pytorch-rocm" for source in triton_sources)
