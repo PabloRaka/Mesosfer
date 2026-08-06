@@ -10,18 +10,39 @@ def test_torch_install_extras_include_cuda_and_rocm():
     config = _pyproject()
     extras = config["project"]["optional-dependencies"]
     sources = config["tool"]["uv"]["sources"]["torch"]
-    triton_sources = config["tool"]["uv"]["sources"]["pytorch-triton-rocm"]
+    all_sources = config["tool"]["uv"]["sources"]
 
     assert "cuda" in extras
     assert "rocm" in extras
-    # Both triton spellings must be mapped: torch <=2.10 needs pytorch-triton-rocm,
-    # torch >=2.11 needs triton-rocm, and the index is explicit=true so an unmapped
-    # name cannot resolve at all.
-    assert "triton-rocm" in config["tool"]["uv"]["sources"]
-    assert "pytorch-triton-rocm" in config["tool"]["uv"]["sources"]
     assert any(source.get("extra") == "cuda" and source.get("index") == "pytorch-cu128" for source in sources)
     assert any(source.get("extra") == "rocm" and source.get("index") == "pytorch-rocm" for source in sources)
-    assert any(source.get("extra") == "rocm" and source.get("index") == "pytorch-rocm" for source in triton_sources)
+
+    # Both triton spellings must point at the ROCm index: torch <=2.10 depends on
+    # pytorch-triton-rocm, torch >=2.11 on triton-rocm, and the index is explicit=true
+    # so an unmapped name cannot resolve from anywhere.
+    for name in ("pytorch-triton-rocm", "triton-rocm"):
+        assert name in all_sources, f"{name} has no source mapping"
+        assert any(source.get("index") == "pytorch-rocm" for source in all_sources[name])
+
+
+def test_sources_with_extra_are_declared_in_that_extra():
+    """uv rejects a source carrying `extra = X` unless the package is also listed in
+    project.optional-dependencies[X]. Transitive deps (triton) must therefore be mapped
+    without an extra. Getting this wrong fails at `uv sync`, not at import time.
+    """
+    config = _pyproject()
+    extras = config["project"]["optional-dependencies"]
+
+    for package, source_list in config["tool"]["uv"]["sources"].items():
+        for source in source_list:
+            extra = source.get("extra")
+            if extra is None:
+                continue
+            listed = extras.get(extra, [])
+            assert any(req.split(">")[0].split("=")[0].split("[")[0].strip() == package for req in listed), (
+                f"source for {package!r} declares extra={extra!r} but {package!r} "
+                f"is not in optional-dependencies[{extra!r}]={listed}"
+            )
 
 
 def test_declared_index_names_all_exist():
