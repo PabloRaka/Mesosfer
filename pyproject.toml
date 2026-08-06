@@ -35,19 +35,21 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-# torch index sources: CUDA 12.8, ROCm 6.4 WHL, or CPU
-# For ROCm 7.0 pre-built images (PyTorch 2.6.0 pre-installed):
-#   uv sync --extra rocm --no-build-isolation
-# The rocm index below is only used when NOT on a pre-built image.
+# torch index sources: CUDA 12.8, ROCm 7.2, or CPU.
+# The ROCm index must match the driver on the host (check with `ls -d /opt/rocm-*`).
+# ROCm wheels bundle their own runtime, so a 7.2 wheel is the right pick for any
+# ROCm 7.x driver; older 6.x hosts should point this URL back at whl/rocm6.4.
+# On images that already ship PyTorch at system level, create the venv with
+# `uv venv --system-site-packages` so it is reused instead of downloaded again.
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "cuda" },
     { index = "pytorch-cu128", extra = "gpu" },
-    { index = "pytorch-rocm64", extra = "rocm" },
+    { index = "pytorch-rocm", extra = "rocm" },
 ]
 pytorch-triton-rocm = [
-    { index = "pytorch-rocm64", extra = "rocm" },
+    { index = "pytorch-rocm", extra = "rocm" },
 ]
 
 [[tool.uv.index]]
@@ -61,8 +63,8 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-rocm64"
-url = "https://download.pytorch.org/whl/rocm6.4"
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
 [project.optional-dependencies]
