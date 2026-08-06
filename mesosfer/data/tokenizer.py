@@ -18,19 +18,28 @@ SPECIAL_TOKENS = [
     "<|user_end|>",
     "<|assistant_start|>", # assistant messages
     "<|assistant_end|>",
-    "<|python_start|>", # assistant invokes python REPL tool
-    "<|python_end|>",
-    "<|output_start|>", # python REPL / tool outputs back to assistant
+    "<|calc_start|>", # assistant invokes the engine's inline expression evaluator
+    "<|calc_end|>",
+    "<|output_start|>", # evaluator / tool results fed back to the assistant
     "<|output_end|>",
-    "<|tool_start|>", # assistant invokes a named tool (shell, nmap, sql, http, ...)
+    "<|tool_start|>", # assistant invokes a named tool (shell, nmap, sql, gcc, http, ...)
     "<|tool_end|>",   # tool call payload is JSON: {"name": ..., "arguments": {...}}
 ]
 # NOTE: Every special token above is part of the actual train/inference protocol:
 # <|bos|> delimits pretraining documents (prepended per-doc by the dataloader); the
 # conversation/tool tokens are emitted by RustBPETokenizer.render_conversation during
-# SFT/RL. <|python_*|> wraps the built-in Python REPL (executed by the engine), while
-# <|tool_start|>/<|tool_end|> wraps a generic named tool call (JSON name+arguments) so
-# any tool family (shell, network scanners, SQL, HTTP, ...) shares one token pair.
+# SFT/RL. <|calc_*|> wraps the engine's inline expression evaluator — see use_calculator()
+# in mesosfer/eval/engine.py, which allows arithmetic and simple string ops only and is NOT a
+# general Python REPL. Anything heavier, including running C/C++/Rust, goes through
+# <|tool_start|>/<|tool_end|>: a generic named tool call (JSON name+arguments) so any tool
+# family (shell, network scanners, SQL, compilers, HTTP, ...) shares one token pair.
+#
+# The language is named inside the JSON payload and never gets its own token. That is also
+# what every open-weight model does — GLM-4.5, Qwen3, Llama 3.1, DeepSeek-V3, Mistral and
+# Kimi K2 all define zero per-language tokens; the code-related tokens they do have
+# (<|code_prefix|>, <|fim_prefix|>) are language-agnostic fill-in-the-middle markers.
+# Llama's <|python_tag|> is likewise a generic tool-call marker, not a Python marker.
+#
 # Do not declare special tokens that are never emitted into the data — they would waste
 # vocab slots and leave untrained embedding / lm_head rows.
 
@@ -316,7 +325,7 @@ class RustBPETokenizer:
         bos = self.get_bos_token_id()
         user_start, user_end = self.encode_special("<|user_start|>"), self.encode_special("<|user_end|>")
         assistant_start, assistant_end = self.encode_special("<|assistant_start|>"), self.encode_special("<|assistant_end|>")
-        python_start, python_end = self.encode_special("<|python_start|>"), self.encode_special("<|python_end|>")
+        calc_start, calc_end = self.encode_special("<|calc_start|>"), self.encode_special("<|calc_end|>")
         output_start, output_end = self.encode_special("<|output_start|>"), self.encode_special("<|output_end|>")
         tool_start, tool_end = self.encode_special("<|tool_start|>"), self.encode_special("<|tool_end|>")
 
@@ -349,13 +358,13 @@ class RustBPETokenizer:
                         if part["type"] == "text":
                             # string part => simply add the tokens
                             add_tokens(value_ids, 1)
-                        elif part["type"] == "python":
-                            # python tool call => add the tokens inside <|python_start|> and <|python_end|>
-                            add_tokens(python_start, 1)
+                        elif part["type"] == "calc":
+                            # python tool call => add the tokens inside <|calc_start|> and <|calc_end|>
+                            add_tokens(calc_start, 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(python_end, 1)
-                        elif part["type"] == "python_output":
-                            # python output => add the tokens inside <|output_start|> and <|output_end|>
+                            add_tokens(calc_end, 1)
+                        elif part["type"] == "calc_output":
+                                # python output => add the tokens inside <|output_start|> and <|output_end|>
                             # none of these tokens are supervised because the tokens come from Python at test time
                             add_tokens(output_start, 0)
                             add_tokens(value_ids, 0)

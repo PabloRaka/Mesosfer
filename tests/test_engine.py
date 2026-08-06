@@ -55,8 +55,8 @@ class ByteTokenizer:
     def __init__(self):
         # Special tokens start at 256
         self._special_tokens = {
-            "<|python_start|>": 256,
-            "<|python_end|>": 257,
+            "<|calc_start|>": 256,
+            "<|calc_end|>": 257,
             "<|output_start|>": 258,
             "<|output_end|>": 259,
             "<|assistant_end|>": 260,
