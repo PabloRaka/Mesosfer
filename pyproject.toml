@@ -55,11 +55,16 @@ torch = [
 # (index stops at 3.5.1), >=2.11 pulls triton-rocm (3.6.0+). Both names are mapped so
 # either torch generation resolves; the index is explicit=true, so an unmapped name
 # fails with "no version of triton-rocm" instead of falling back to PyPI.
+#
+# No `extra = "rocm"` here on purpose: uv requires that a source carrying an extra
+# also be listed in project.optional-dependencies for that extra, and these are
+# transitive deps of torch, not direct ones. Leaving the extra off makes the mapping
+# unconditional, which is harmless because only ROCm torch ever requests these names.
 pytorch-triton-rocm = [
-    { index = "pytorch-rocm", extra = "rocm" },
+    { index = "pytorch-rocm" },
 ]
 triton-rocm = [
-    { index = "pytorch-rocm", extra = "rocm" },
+    { index = "pytorch-rocm" },
 ]
 
 [[tool.uv.index]]
