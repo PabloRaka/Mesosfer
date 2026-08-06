@@ -65,6 +65,25 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### 3. Create Virtual Environment
 
+First check whether the host already ships PyTorch:
+
+```bash
+/usr/bin/python3 -c "import torch; print(torch.__version__, torch.version.hip)"
+```
+
+**If that prints a version** (pre-built PyTorch-ROCm image), inherit it — a plain
+`uv venv` is isolated and would hide it, which then makes `--no-build-isolation`
+fail with `No module named 'torch'`:
+
+```bash
+cd /path/to/mesosfer
+uv venv --python 3.12 --system-site-packages
+source .venv/bin/activate
+```
+
+**If it errors with `No module named 'torch'`** (driver-only VM), a plain venv is
+correct and torch is installed from the wheel index in step 4:
+
 ```bash
 cd /path/to/mesosfer
 uv venv --python 3.12
@@ -73,19 +92,29 @@ source .venv/bin/activate
 
 ### 4. Install with ROCm Support
 
-```bash
-# For ROCm 7.0 pre-built images (PyTorch 2.6.0 already installed in image):
-uv sync --extra rocm --no-build-isolation
+Check the driver version first, because the wheel index has to match it:
 
-# Install Flash Attention 2 for ROCm (enables faster training vs SDPA fallback)
+```bash
+ls -d /opt/rocm-*
+```
+
+`pyproject.toml` points at `whl/rocm7.2`, which is right for any ROCm 7.x driver
+(the wheels bundle their own runtime). On a ROCm 6.x host, change that index URL
+to `whl/rocm6.4` before syncing.
+
+```bash
+uv sync --extra rocm --no-build-isolation
+```
+
+```bash
+# Flash Attention 2 for ROCm (faster than the SDPA fallback; optional)
 uv pip install flash-attn --no-build-isolation
 ```
 
-> **Why `--no-build-isolation`?** The `PyTorch 2.6.0 - ROCm 7.0` image has torch
-> pre-installed at the system level. This flag tells uv to reuse it instead of
-> downloading from the WHL index (which only carries ROCm 6.4 builds).
-> The same flag is needed for `flash-attn` because it compiles against the
-> pre-installed ROCm torch headers.
+> **Why `--no-build-isolation`?** `flash-attn` compiles against the ROCm torch
+> headers of the torch that is already installed. Without the flag, pip would set
+> up an isolated build environment and pull a fresh (CUDA) torch to build against,
+> which then does not match the ROCm torch at runtime.
 
 ### 5. Verify Installation
 
