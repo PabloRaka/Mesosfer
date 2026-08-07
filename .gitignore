@@ -29,5 +29,10 @@ superpowers/specs/
 # Local pre-change file backups (e.g. tokenizer sweep) — not for version control
 .backup/
 
+# prepare_data.py checkpoints. These default to the repo root and are full tar.gz
+# snapshots of the whole output dir (not incremental), so they get large fast.
+# Use --checkpoint-dir to put them elsewhere, or --checkpoint-every-gb to space them out.
+data_checkpoint_*.tar.gz
+
 # RLHF collected feedback (runtime data, not for version control)
 data/rlhf/feedback.jsonl
