@@ -17,6 +17,7 @@ import json
 import glob
 import hashlib
 import shutil
+import tarfile
 import subprocess
 import argparse
 import logging
@@ -2104,15 +2105,26 @@ def create_checkpoint(output_dir, checkpoint_dir, checkpoint_number):
     archive_path = os.path.join(checkpoint_dir, checkpoint_name)
 
     logger.info(f"  💾 Creating checkpoint #{checkpoint_number} → {archive_path}.tar.gz")
-    result = shutil.make_archive(
-        archive_path,
-        "gztar",
-        root_dir=os.path.dirname(output_dir),
-        base_dir=os.path.basename(output_dir),
-    )
-    if not result:
-        raise RuntimeError(f"Checkpoint creation failed (returned empty path) for {archive_path}")
     archive_full = archive_path + ".tar.gz"
+    tmp_archive = archive_full + ".tmp"
+    base_name = os.path.basename(output_dir)
+
+    # Built by hand rather than shutil.make_archive so transient files can be skipped.
+    # make_archive walks the directory and stats each entry; *.valpart and *.tmp are
+    # written and deleted as shards flush (write_final_val_shard removes them all after
+    # merging), so one can disappear between the listing and the stat, and the resulting
+    # FileNotFoundError used to kill the whole run mid-download. They are also worthless
+    # inside a checkpoint: only the finished .parquet shards and progress.json matter.
+    with tarfile.open(tmp_archive, "w:gz") as tar:
+        for entry in sorted(os.listdir(output_dir)):
+            if entry.endswith((".valpart", ".tmp")):
+                continue
+            try:
+                tar.add(os.path.join(output_dir, entry), arcname=os.path.join(base_name, entry))
+            except FileNotFoundError:
+                logger.warning(f"  Skipping file that vanished during checkpoint: {entry}")
+    os.replace(tmp_archive, archive_full)
+
     if not os.path.isfile(archive_full):
         raise RuntimeError(f"Checkpoint archive not found after creation: {archive_full}")
     size_gb = os.path.getsize(archive_full) / (1024**3)
@@ -2264,18 +2276,57 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     rng = random.Random(42)
 
     t0 = time.time()
-    shard_idx = 0
-    val_part_idx = 0
-    stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+
+    # Resume. Without this the function always started at shard_00000, so running it a
+    # second time (e.g. to add sources with --sources) silently overwrote the shards the
+    # previous run had written, and only the tail of the older run survived. The resume
+    # code that used to exist lived below the interleaved dispatch in main(), i.e. only
+    # on the sequential path, so the default mode never reached it.
+    # --fresh already deleted progress.json and the parquet files before we get here, so
+    # finding a progress file at this point unambiguously means "continue".
+    prev = load_progress(output_dir)
+    requested_all = list(source_names)
+    already_done: set = set()
+    if prev is not None:
+        already_done = set(normalize_completed_sources(prev, require_docs=True))
+        requested_all = sorted(set(prev.get("requested_sources") or []) | set(source_names))
+        pending = [n for n in source_names if n not in already_done]
+        skipped = [n for n in source_names if n in already_done]
+        shard_idx = prev.get("next_shard_idx", 0)
+        val_part_idx = prev.get("next_val_part_idx", 0)
+        stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+        for name, counts in prev.get("stats", {}).items():
+            stats[name] = counts
+        checkpoint_number = prev.get("checkpoint_number", 0)
+        bytes_at_last_checkpoint = prev.get("bytes_at_last_checkpoint", 0)
+        logger.info(f"Resuming interleaved run at shard_idx={shard_idx} "
+                    f"({len(already_done)} source(s) already complete).")
+        if skipped:
+            logger.info(f"  Skipping already-complete sources: {', '.join(skipped)}")
+        if not pending:
+            print("\n  ✅ All requested sources are already complete. Use --fresh to redo them.\n")
+            return
+        source_names = pending
+    else:
+        shard_idx = 0
+        val_part_idx = 0
+        stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+        checkpoint_number = 0
+        bytes_at_last_checkpoint = 0
+
     global_max_chars = int(args.max_tokens * CHARS_PER_TOKEN) if args.max_tokens else None
-    global_chars = 0
-    cluster_size = getattr(args, 'cluster_size', 32)  # docs of same domain per run
+    # Cumulative across runs: --max-tokens is a total budget, not a per-invocation one.
+    global_chars = sum(s["chars"] for s in stats.values())
+    if global_max_chars is not None and global_chars >= global_max_chars:
+        print(f"\n  ⚠️  Token budget already reached "
+              f"(~{int(global_chars / CHARS_PER_TOKEN):,} >= {args.max_tokens:,}).")
+        print("  Raise --max-tokens to give the new sources room, or use --fresh.\n")
+        return
+    cluster_size = getattr(args, 'cluster_size', 32)  # docs of same domain run
     temperature = getattr(args, 'sampling_temperature', 1.2)
 
     checkpoint_dir = args.checkpoint_dir or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     checkpoint_every_bytes = int(args.checkpoint_every_gb * 1024 * 1024 * 1024)
-    bytes_at_last_checkpoint = 0
-    checkpoint_number = 0
 
     # Open all source iterators
     logger.info(f"Opening {len(source_names)} source iterators for interleaved streaming...")
@@ -2385,7 +2436,10 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     print("-" * 85)
     total_docs = 0
     total_chars = 0
-    for source_name in source_names:
+    # Every source with data on disk, not just the ones this invocation handled, so the
+    # totals and category shares describe the whole dataset across incremental batches.
+    summary_sources = [n for n in DATASET_SOURCES if stats.get(n, {}).get("docs")]
+    for source_name in summary_sources:
         s = stats[source_name]
         est_tokens = int(s["chars"] / CHARS_PER_TOKEN)
         total_docs += s["docs"]
@@ -2409,7 +2463,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     cat_tokens = {}
     for cat in ["cybersecurity", "code", "general", "instruction"]:
         cat_tokens[cat] = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
-                              for n in source_names
+                              for n in summary_sources
                               if DATASET_SOURCES[n]["category"] == cat)
     if total_tokens > 0:
         for cat in ["cybersecurity", "code", "general", "instruction"]:
@@ -2423,7 +2477,9 @@ def interleaved_shuffle_main(args, source_names, output_dir):
         create_checkpoint(output_dir, checkpoint_dir, checkpoint_number)
 
     save_progress(output_dir, {
-        "completed_sources": source_names,
+        # Union, not replacement: overwriting these was what made each --sources batch
+        # erase the record of the previous ones, so --status only ever showed the last run.
+        "completed_sources": sorted(already_done | set(source_names)),
         "next_shard_idx": shard_idx,
         "stats": dict(stats),
         "finished": True,
@@ -2431,7 +2487,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
         "bytes_at_last_checkpoint": get_total_parquet_bytes(output_dir),
         "checkpoint_number": checkpoint_number + 1,
         "next_val_part_idx": val_part_idx,
-        "requested_sources": source_names,
+        "requested_sources": requested_all,
     })
 
     verify_shard_balance(output_dir)
