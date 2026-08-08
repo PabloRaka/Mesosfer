@@ -2473,8 +2473,17 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                 print(f"  {emoji} {cat.capitalize():15s}: ~{cat_tokens[cat]:,} tokens ({pct:.1f}%)")
     print()
 
-    if global_chars > 0:
+    # Final checkpoint, subject to the same threshold as the periodic ones. This used to
+    # run unconditionally, which meant --checkpoint-every-gb could not switch checkpoints
+    # off: each archive is a full tar.gz of the output dir, so N incremental --sources
+    # batches left N snapshots behind. Seven batches over a 15 GB dataset produced 46 GB
+    # of archives and filled the disk.
+    final_bytes = get_total_parquet_bytes(output_dir)
+    if global_chars > 0 and (final_bytes - bytes_at_last_checkpoint) >= checkpoint_every_bytes:
         create_checkpoint(output_dir, checkpoint_dir, checkpoint_number)
+    elif global_chars > 0:
+        logger.info(f"  Skipping final checkpoint (< {args.checkpoint_every_gb:g} GB since the last one). "
+                    f"Resume uses progress.json, not the archives.")
 
     save_progress(output_dir, {
         # Union, not replacement: overwriting these was what made each --sources batch

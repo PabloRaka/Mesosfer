@@ -347,3 +347,30 @@ def test_max_tokens_budget_is_cumulative_across_batches(monkeypatch, tmp_path, c
     assert total <= Capped.max_tokens * 1.05, (
         f"budget is per-run instead of cumulative: {total:,.0f} tokens"
     )
+
+
+def test_checkpoint_every_gb_can_disable_checkpoints(monkeypatch, tmp_path, capsys):
+    """A large --checkpoint-every-gb must suppress the final checkpoint too.
+
+    The end-of-run checkpoint used to be unconditional, so the flag could not turn
+    checkpointing off. Each archive is a full tar.gz of the output dir, so running N
+    incremental --sources batches left N snapshots behind: seven batches over a 15 GB
+    dataset produced 46 GB of archives and filled the disk.
+    """
+    _patch_streaming(monkeypatch)
+    first, _ = _two_batches()
+    archives = tmp_path / "ckpt"
+    archives.mkdir()
+
+    calls = []
+    monkeypatch.setattr(prepare_data, "create_checkpoint",
+                        lambda *a, **k: calls.append(a))
+
+    class NoCheckpoint(_Args):
+        checkpoint_dir = str(archives)
+        checkpoint_every_gb = 9999.0
+
+    prepare_data.interleaved_shuffle_main(NoCheckpoint(), list(first), str(tmp_path))
+    capsys.readouterr()
+
+    assert calls == [], f"checkpoint written despite a 9999 GB threshold: {calls}"
