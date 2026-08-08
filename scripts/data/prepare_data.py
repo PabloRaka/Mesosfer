@@ -483,6 +483,11 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "secure_code_typescript":  1.3,
     "secure_code_java":        1.3,
     "secure_code_php":         1.3,
+    "code_sql":                1.5,  # injection is the most common vuln class
+    "code_powershell":         1.6,  # attacker tooling on Windows, shows up in real logs
+    "code_assembly":           1.6,  # reverse engineering, pairs with local_reverse_engineering
+    "code_csharp":             1.2,
+    "code_jupyter":            1.0,  # ML/AI code
     "metasploit":              1.7,
     "exploitdb":               1.8,
     "swallow_code_v2":         1.3,
@@ -761,6 +766,67 @@ DATASET_SOURCES = {
     "split": "train",
     "streaming": True,
     "data_dir": "data/php",
+},
+
+# The `code_*` entries below are the same thing as `secure_code_*` above: plain
+# per-language directories of bigcode/the-stack-dedup, no security filter. The older
+# name is kept only because `completed_sources` in progress.json is keyed by source
+# name, so renaming would make every finished shard look un-downloaded.
+"code_sql": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "SQL — queries, schemas, stored procedures (context for injection classes)",
+    "category": "code",
+    "max_tokens": 1_500_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/sql",
+},
+
+"code_powershell": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "PowerShell — Windows administration and offensive tooling",
+    "category": "code",
+    "max_tokens": 800_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/powershell",
+},
+
+"code_assembly": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "Assembly — disassembly listings and low-level routines (reverse engineering)",
+    "category": "code",
+    "max_tokens": 800_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/assembly",
+},
+
+"code_csharp": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "C# — .NET applications and tooling",
+    "category": "code",
+    "max_tokens": 2_000_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/c-sharp",
+},
+
+"code_jupyter": {
+    # Notebooks are where machine-learning and AI code actually lives on GitHub:
+    # training loops, data pipelines, model evaluation, interleaved with prose.
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "Jupyter notebooks — machine learning and AI code with inline explanation",
+    "category": "code",
+    "max_tokens": 2_000_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/jupyter-notebook",
 },
 
 "swallow_code_v2": {

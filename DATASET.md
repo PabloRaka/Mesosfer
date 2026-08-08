@@ -89,6 +89,9 @@ bound on volume per source.
 | `threat_report_pdfs`        | Cybersecurity | 1.5    | 90M        | pdf_manifest                                | Vendor threat report PDFs.               |
 | `splunk_rules`              | Cybersecurity | 1.5    | 60M        | github_repo                                 | Splunk security detections.              |
 | `zeek_scripts`              | Cybersecurity | 1.5    | 40M        | github_repo                                 | Zeek scripts and packages.               |
+| `code_powershell`           | Code          | 1.6    | 800M       | `bigcode/the-stack-dedup`                   | PowerShell — Windows admin + offensive.  |
+| `code_assembly`             | Code          | 1.6    | 800M       | `bigcode/the-stack-dedup`                   | Assembly — reverse engineering.          |
+| `code_sql`                  | Code          | 1.5    | 1.5B       | `bigcode/the-stack-dedup`                   | SQL — injection context.                 |
 | `secure_code_python`        | Code          | 1.4    | 4.0B       | `bigcode/the-stack-dedup`                   | Python (dedup).                          |
 | `secure_code_c`             | Code          | 1.4    | 3.0B       | `bigcode/the-stack-dedup`                   | C (dedup).                               |
 | `secure_code_shell`         | Code          | 1.4    | 2.0B       | `bigcode/the-stack-dedup`                   | Shell (dedup).                           |
@@ -100,6 +103,8 @@ bound on volume per source.
 | `secure_code_cpp`           | Code          | 1.2    | 3.0B       | `bigcode/the-stack-dedup`                   | C++ (dedup).                             |
 | `secure_code_rust`          | Code          | 1.2    | 2.4B       | `bigcode/the-stack-dedup`                   | Rust (dedup).                            |
 | `secure_code_go`            | Code          | 1.2    | 2.4B       | `bigcode/the-stack-dedup`                   | Go (dedup).                              |
+| `code_csharp`               | Code          | 1.2    | 2.0B       | `bigcode/the-stack-dedup`                   | C# — .NET applications and tooling.      |
+| `code_jupyter`              | Code          | 1.0    | 2.0B       | `bigcode/the-stack-dedup`                   | Notebooks — machine learning / AI code.  |
 | `nemotron_cc_math`          | Reasoning     | 1.0    | 18.0B      | `nvidia/Nemotron-CC-Math-v1` (`4plus`)      | High-quality math/reasoning corpus.      |
 | `finemath`                  | Reasoning     | 0.9    | 3.0B       | `HuggingFaceTB/finemath` (`finemath-4plus`) | Math reasoning.                          |
 | `fineweb_edu`               | General       | 0.7    | 4.0B       | `HuggingFaceFW/fineweb-edu` (`sample-10BT`) | Educational web content.                 |
