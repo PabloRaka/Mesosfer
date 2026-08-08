@@ -14,6 +14,7 @@ For details of how the dataset was prepared, see `repackage_data_reference.py`.
 
 import os
 import argparse
+import random
 import time
 import pyarrow.parquet as pq
 
@@ -131,7 +132,16 @@ def parquets_iter_batched(split, start=0, step=1):
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
     parquet_paths = list_parquet_files()
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+    if split == "train":
+        parquet_paths = parquet_paths[:-1]
+        # prepare_data interleaves sources *within* one run, but each `--sources` batch
+        # appends its own contiguous block of shards. Filename order is therefore
+        # download order, so reading it as-is trains on one domain at a time (and makes
+        # tok_train's max_chars cap see only the earliest batches). Fixed seed so every
+        # DDP rank and every restart agree on the same permutation.
+        random.Random(1337).shuffle(parquet_paths)
+    else:
+        parquet_paths = parquet_paths[-1:]
     for filepath in parquet_paths:
         pf = pq.ParquetFile(filepath)
         for rg_idx in range(start, pf.num_row_groups, step):
