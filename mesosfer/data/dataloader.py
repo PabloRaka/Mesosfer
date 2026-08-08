@@ -20,7 +20,7 @@ import torch
 import pyarrow.parquet as pq
 
 from mesosfer.utils.common import get_dist_info
-from mesosfer.data.dataset import list_parquet_files
+from mesosfer.data.dataset import list_parquet_files, split_parquet_paths
 
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     """
@@ -35,7 +35,9 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     warn_on_legacy = ddp_rank == 0 and split == "train" # rank 0 on train split will warn on legacy
     parquet_paths = list_parquet_files(warn_on_legacy=warn_on_legacy)
     assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+    # Shared with tok_train's reader so both see the same shuffled order. pq_idx in the
+    # resume state indexes into this permutation, which is stable for a fixed shard count.
+    parquet_paths = split_parquet_paths(parquet_paths, split)
 
     resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
     resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None

@@ -48,3 +48,20 @@ def test_val_split_is_unaffected(tmp_path, monkeypatch):
     seen = [batch[0] for batch in dataset.parquets_iter_batched(split="val")]
 
     assert seen == ["shard 19"]
+
+
+def test_pretrain_dataloader_uses_the_same_order():
+    """base_train reads through dataloader._document_batches, not parquets_iter_batched.
+
+    They must agree: if only one of them shuffles, tok_train and base_train see
+    different corpora, and the tokenizer is fitted to data the model never reads
+    in that order.
+    """
+    from mesosfer.data import dataloader
+
+    paths = [f"shard_{i:05d}.parquet" for i in range(20)]
+
+    assert dataloader.split_parquet_paths is dataset.split_parquet_paths
+    assert dataset.split_parquet_paths(paths, "train") == dataset.split_parquet_paths(paths, "train")
+    assert dataset.split_parquet_paths(paths, "train") != paths[:-1]
+    assert dataset.split_parquet_paths(paths, "val") == paths[-1:]

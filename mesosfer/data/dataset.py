@@ -124,24 +124,35 @@ def _print_legacy_warning(missing_dir):
     print("=" * 80)
     print()
 
+# Seed for the train-shard permutation. Every reader must use the same one, or DDP
+# ranks disagree about which shard index means which file.
+SHARD_SHUFFLE_SEED = 1337
+
+
+def split_parquet_paths(parquet_paths, split):
+    """Split into train/val: val is the last file, train is everything else, shuffled.
+
+    prepare_data interleaves sources *within* one run, but each `--sources` batch
+    appends its own contiguous block of shards. Filename order is therefore download
+    order, so reading it as-is trains on one domain at a time (and makes tok_train's
+    --max-chars cap see only the earliest batches). Fixed seed so every DDP rank and
+    every restart agree on the same permutation.
+    """
+    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    if split == "val":
+        return parquet_paths[-1:]
+    train_paths = parquet_paths[:-1]  # a copy, safe to shuffle in place
+    random.Random(SHARD_SHUFFLE_SEED).shuffle(train_paths)
+    return train_paths
+
+
 def parquets_iter_batched(split, start=0, step=1):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
     - split can be "train" or "val". the last parquet file will be val.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
-    parquet_paths = list_parquet_files()
-    if split == "train":
-        parquet_paths = parquet_paths[:-1]
-        # prepare_data interleaves sources *within* one run, but each `--sources` batch
-        # appends its own contiguous block of shards. Filename order is therefore
-        # download order, so reading it as-is trains on one domain at a time (and makes
-        # tok_train's max_chars cap see only the earliest batches). Fixed seed so every
-        # DDP rank and every restart agree on the same permutation.
-        random.Random(1337).shuffle(parquet_paths)
-    else:
-        parquet_paths = parquet_paths[-1:]
+    parquet_paths = split_parquet_paths(list_parquet_files(), split)
     for filepath in parquet_paths:
         pf = pq.ParquetFile(filepath)
         for rg_idx in range(start, pf.num_row_groups, step):
