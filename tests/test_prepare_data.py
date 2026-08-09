@@ -252,3 +252,125 @@ def test_writer_output_dir_matches_reader_auxiliary_dir():
     aux_basenames = {os.path.basename(p) for p in dataset.AUXILIARY_DATA_DIRS}
     # default --output-dir in prepare_data is "base_data_cybersecurity"
     assert "base_data_cybersecurity" in aux_basenames
+
+
+# ---------------------------------------------------------------------------
+# Incremental --sources batches (interleaved mode)
+#
+# interleaved_shuffle_main used to start at shard_00000 on every invocation, so a
+# second run with different --sources overwrote the first run's shards and replaced
+# its completed_sources. Only the tail of the older run survived, silently. These
+# tests pin the resume behaviour that makes incremental batching safe.
+# ---------------------------------------------------------------------------
+
+class _Args:
+    max_tokens = None
+    shard_size = 500
+    val_ratio = 0.008
+    fresh = False
+    cluster_size = 8
+    sampling_temperature = 1.2
+    checkpoint_dir = None
+    checkpoint_every_gb = 9999.0
+
+
+def _patch_streaming(monkeypatch):
+    """Replace network streaming + checkpointing with local stand-ins."""
+    monkeypatch.setattr(
+        prepare_data, "stream_dataset_texts",
+        lambda name, config, *a, **k: (f"{name} doc {i} " + "x" * 400 for i in range(2000)),
+    )
+    monkeypatch.setattr(prepare_data, "create_checkpoint", lambda *a, **k: None)
+    monkeypatch.setattr(prepare_data, "verify_shard_balance", lambda *a, **k: None)
+
+
+def _shard_count(directory):
+    return len(list(directory.glob("shard_*.parquet")))
+
+
+def _two_batches():
+    names = list(prepare_data.DATASET_SOURCES)
+    return names[:2], names[2:4]
+
+
+def test_second_batch_appends_instead_of_overwriting(monkeypatch, tmp_path, capsys):
+    _patch_streaming(monkeypatch)
+    first, second = _two_batches()
+    out = str(tmp_path)
+
+    prepare_data.interleaved_shuffle_main(_Args(), list(first), out)
+    after_first = _shard_count(tmp_path)
+    progress_first = prepare_data.load_progress(out)
+
+    prepare_data.interleaved_shuffle_main(_Args(), list(second), out)
+    after_second = _shard_count(tmp_path)
+    progress_second = prepare_data.load_progress(out)
+    capsys.readouterr()
+
+    assert after_second > after_first, "second batch overwrote the first batch's shards"
+    assert progress_second["next_shard_idx"] > progress_first["next_shard_idx"]
+    # completed_sources is a union across runs, not the last run's list
+    assert set(first) <= set(progress_second["completed_sources"])
+    assert set(second) <= set(progress_second["completed_sources"])
+    # per-source stats from the first batch survive
+    for name in first:
+        assert progress_second["stats"].get(name, {}).get("docs")
+
+
+def test_already_completed_sources_are_skipped(monkeypatch, tmp_path, capsys):
+    _patch_streaming(monkeypatch)
+    first, _ = _two_batches()
+    out = str(tmp_path)
+
+    prepare_data.interleaved_shuffle_main(_Args(), list(first), out)
+    before = _shard_count(tmp_path)
+    prepare_data.interleaved_shuffle_main(_Args(), list(first), out)
+    capsys.readouterr()
+
+    assert _shard_count(tmp_path) == before, "re-running finished sources duplicated data"
+
+
+def test_max_tokens_budget_is_cumulative_across_batches(monkeypatch, tmp_path, capsys):
+    _patch_streaming(monkeypatch)
+    first, second = _two_batches()
+    out = str(tmp_path)
+
+    class Capped(_Args):
+        max_tokens = 100_000
+
+    prepare_data.interleaved_shuffle_main(Capped(), list(first), out)
+    prepare_data.interleaved_shuffle_main(Capped(), list(second), out)
+    capsys.readouterr()
+
+    stats = prepare_data.load_progress(out)["stats"]
+    total = sum(s["chars"] for s in stats.values()) / prepare_data.CHARS_PER_TOKEN
+    assert total <= Capped.max_tokens * 1.05, (
+        f"budget is per-run instead of cumulative: {total:,.0f} tokens"
+    )
+
+
+def test_checkpoint_every_gb_can_disable_checkpoints(monkeypatch, tmp_path, capsys):
+    """A large --checkpoint-every-gb must suppress the final checkpoint too.
+
+    The end-of-run checkpoint used to be unconditional, so the flag could not turn
+    checkpointing off. Each archive is a full tar.gz of the output dir, so running N
+    incremental --sources batches left N snapshots behind: seven batches over a 15 GB
+    dataset produced 46 GB of archives and filled the disk.
+    """
+    _patch_streaming(monkeypatch)
+    first, _ = _two_batches()
+    archives = tmp_path / "ckpt"
+    archives.mkdir()
+
+    calls = []
+    monkeypatch.setattr(prepare_data, "create_checkpoint",
+                        lambda *a, **k: calls.append(a))
+
+    class NoCheckpoint(_Args):
+        checkpoint_dir = str(archives)
+        checkpoint_every_gb = 9999.0
+
+    prepare_data.interleaved_shuffle_main(NoCheckpoint(), list(first), str(tmp_path))
+    capsys.readouterr()
+
+    assert calls == [], f"checkpoint written despite a 9999 GB threshold: {calls}"

@@ -14,6 +14,8 @@ For details of how the dataset was prepared, see `repackage_data_reference.py`.
 
 import os
 import argparse
+import random
+import re
 import time
 import pyarrow.parquet as pq
 
@@ -123,20 +125,59 @@ def _print_legacy_warning(missing_dir):
     print("=" * 80)
     print()
 
+# Seed for the train-shard permutation. Every reader must use the same one, or DDP
+# ranks disagree about which shard index means which file.
+SHARD_SHUFFLE_SEED = 1337
+
+
+def split_parquet_paths(parquet_paths, split):
+    """Split into train/val: val is the last file, train is everything else, shuffled.
+
+    prepare_data interleaves sources *within* one run, but each `--sources` batch
+    appends its own contiguous block of shards. Filename order is therefore download
+    order, so reading it as-is trains on one domain at a time (and makes tok_train's
+    --max-chars cap see only the earliest batches). Fixed seed so every DDP rank and
+    every restart agree on the same permutation.
+    """
+    assert split in ["train", "val"], "split must be 'train' or 'val'"
+    if split == "val":
+        return parquet_paths[-1:]
+    train_paths = parquet_paths[:-1]  # a copy, safe to shuffle in place
+    random.Random(SHARD_SHUFFLE_SEED).shuffle(train_paths)
+    return train_paths
+
+
+# the-stack stores notebooks as raw .ipynb JSON, execution outputs included, and image
+# outputs are base64 blobs. code_jupyter is 15.5% of this corpus by characters and most
+# of those characters are those blobs. Substring guard first: it is a cheap C-level scan
+# that the ~90% of documents which are not notebooks fail immediately.
+_NOTEBOOK_MARKER = '"output_type"'
+_NOTEBOOK_BLOB_RE = re.compile(r'"(image/\w+|application/pdf)": "[A-Za-z0-9+/=\\n]{200,}"')
+
+
+def strip_notebook_blobs(text):
+    """Replace base64 output payloads in raw notebook JSON with a short placeholder.
+
+    Keeps the notebook's code and markdown, which is the machine-learning and AI content
+    code_jupyter was added for, and drops the rendered images that teach nothing.
+    """
+    if _NOTEBOOK_MARKER not in text:
+        return text
+    return _NOTEBOOK_BLOB_RE.sub(r'"\1": "<stripped>"', text)
+
+
 def parquets_iter_batched(split, start=0, step=1):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
     - split can be "train" or "val". the last parquet file will be val.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
-    assert split in ["train", "val"], "split must be 'train' or 'val'"
-    parquet_paths = list_parquet_files()
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+    parquet_paths = split_parquet_paths(list_parquet_files(), split)
     for filepath in parquet_paths:
         pf = pq.ParquetFile(filepath)
         for rg_idx in range(start, pf.num_row_groups, step):
             rg = pf.read_row_group(rg_idx)
-            texts = rg.column('text').to_pylist()
+            texts = [strip_notebook_blobs(t) for t in rg.column('text').to_pylist()]
             yield texts
 
 # -----------------------------------------------------------------------------
