@@ -15,6 +15,7 @@ For details of how the dataset was prepared, see `repackage_data_reference.py`.
 import os
 import argparse
 import random
+import re
 import time
 import pyarrow.parquet as pq
 
@@ -146,6 +147,25 @@ def split_parquet_paths(parquet_paths, split):
     return train_paths
 
 
+# the-stack stores notebooks as raw .ipynb JSON, execution outputs included, and image
+# outputs are base64 blobs. code_jupyter is 15.5% of this corpus by characters and most
+# of those characters are those blobs. Substring guard first: it is a cheap C-level scan
+# that the ~90% of documents which are not notebooks fail immediately.
+_NOTEBOOK_MARKER = '"output_type"'
+_NOTEBOOK_BLOB_RE = re.compile(r'"(image/\w+|application/pdf)": "[A-Za-z0-9+/=\\n]{200,}"')
+
+
+def strip_notebook_blobs(text):
+    """Replace base64 output payloads in raw notebook JSON with a short placeholder.
+
+    Keeps the notebook's code and markdown, which is the machine-learning and AI content
+    code_jupyter was added for, and drops the rendered images that teach nothing.
+    """
+    if _NOTEBOOK_MARKER not in text:
+        return text
+    return _NOTEBOOK_BLOB_RE.sub(r'"\1": "<stripped>"', text)
+
+
 def parquets_iter_batched(split, start=0, step=1):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
@@ -157,7 +177,7 @@ def parquets_iter_batched(split, start=0, step=1):
         pf = pq.ParquetFile(filepath)
         for rg_idx in range(start, pf.num_row_groups, step):
             rg = pf.read_row_group(rg_idx)
-            texts = rg.column('text').to_pylist()
+            texts = [strip_notebook_blobs(t) for t in rg.column('text').to_pylist()]
             yield texts
 
 # -----------------------------------------------------------------------------
