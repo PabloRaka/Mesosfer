@@ -31,7 +31,7 @@ Usage:
 
     # Upload from a custom dir under ~/.cache/mesosfer/
     python scripts/upload_checkpoint_to_hf.py --artifact dataset \\
-        --dataset-name base_data_cybersecurity
+        --dataset-dirs base_data_cybersecurity
 
 Checkpoint sources:
     base  → ~/.cache/mesosfer/base_checkpoints/<depth>/
