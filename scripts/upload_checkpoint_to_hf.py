@@ -462,10 +462,6 @@ DATASET_DIRS = [
     "base_data_climbmix",        # output of mesosfer/data/dataset.py
 ]
 
-# Shards per commit. The Hub allows 128 repository commits per hour, so a 540-shard
-# dataset must not commit per file. 50 keeps a 12B-token corpus at ~11 commits.
-UPLOAD_CHUNK = 50
-
 
 def _list_local_parquets(data_dir: Path) -> list[Path]:
     """Return sorted list of .parquet files in data_dir (no .tmp files)."""
@@ -526,27 +522,22 @@ def upload_dataset(api, base_dir: str, repo: str, dataset_names: list[str] | Non
             info(f"    {skipped} shard(s) already in repo — skipping")
 
         # One upload_file call is one commit, and the Hub caps commits at 128/hour, so a
-        # per-file loop dies partway through any real dataset. upload_folder batches a
-        # whole chunk into a single commit; UPLOAD_CHUNK keeps each commit a sane size
-        # while staying far under the hourly cap.
+        # per-file loop dies partway through any real dataset. upload_folder preuploads
+        # the LFS blobs and then makes a single commit for the whole batch, so shard
+        # count stops mattering. A failed run re-uses the already-uploaded blobs.
         uploaded = 0
-        for start in range(0, len(pending), UPLOAD_CHUNK):
-            chunk = pending[start:start + UPLOAD_CHUNK]
-            chunk_mb = sum(p.stat().st_size for p in chunk) / (1024 * 1024)
-            info(
-                f"    [{start + 1}-{start + len(chunk)}/{len(pending)}] "
-                f"Uploading {len(chunk)} shard(s), {chunk_mb:.0f} MB…"
-            )
+        if pending:
+            total_mb = sum(p.stat().st_size for p in pending) / (1024 * 1024)
+            info(f"    Uploading {len(pending)} shard(s), {total_mb:.0f} MB, in one commit…")
             api.upload_folder(
                 folder_path=str(data_dir),
                 path_in_repo=repo_prefix,
                 repo_id=repo,
                 repo_type="model",
-                allow_patterns=[p.name for p in chunk],
-                commit_message=f"Add {dir_name} shards {chunk[0].name}..{chunk[-1].name}",
+                allow_patterns=[p.name for p in pending],
+                commit_message=f"Add {len(pending)} {dir_name} shards",
             )
-            uploaded += len(chunk)
-            success(f"    ✓ {uploaded}/{len(pending)} uploaded")
+            uploaded = len(pending)
 
         success(f"  [{dir_name}] Done: {uploaded} uploaded, {skipped} skipped")
         grand_uploaded += uploaded
