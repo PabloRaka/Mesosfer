@@ -89,7 +89,6 @@ parser.add_argument("--ultrachat-epochs", type=int, default=1, help="epochs of U
 parser.add_argument("--trendyol-cyber-epochs", type=int, default=1, help="epochs of Trendyol Cybersecurity Instruction (53K rows, 0=skip)")
 parser.add_argument("--tiamz-cybersec-epochs", type=int, default=2, help="epochs of Tiamz cybersecurity Q&A (12K rows)")
 parser.add_argument("--alpaca-indonesian-epochs", type=int, default=1, help="epochs of Alpaca Cleaned Indonesian instruction dataset (~52K rows, 0=skip)")
-parser.add_argument("--competition-math-epochs", type=int, default=2, help="epochs of competition_math_sft (~10K rows, 0=skip)")
 parser.add_argument("--magpie-reasoning-epochs", type=int, default=1, help="epochs of magpie_reasoning_sft (~50K rows, 0=skip)")
 parser.add_argument("--open-thoughts-epochs", type=int, default=1, help="epochs of open_thoughts_sft (~50K rows, 0=skip)")
 parser.add_argument("--hermes-func-calling-epochs", type=int, default=2, help="epochs of Hermes function calling (20K rows, ungated tool-calling)")
@@ -305,7 +304,6 @@ elif not args.disable_cybersec_sft:
         trendyol_cyber_epochs=args.trendyol_cyber_epochs,
         tiamz_cybersec_epochs=args.tiamz_cybersec_epochs,
         alpaca_indonesian_epochs=args.alpaca_indonesian_epochs,
-        competition_math_epochs=args.competition_math_epochs,
         magpie_reasoning_epochs=args.magpie_reasoning_epochs,
         open_thoughts_epochs=args.open_thoughts_epochs,
         nist_cybersec_epochs=args.nist_cybersec_epochs,

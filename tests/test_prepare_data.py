@@ -190,17 +190,30 @@ def test_dataset2_marketing_filter_only_applies_to_dataset2_sources():
     assert prepare_data.is_high_quality_security_text(old_source_marketing, "secure_code_python") is True
 
 
-def test_competition_math_moved_to_sft():
-    # competition_math is instruction-tuning data, so it must NOT be in the
-    # pretraining sources/weights — it now lives in download_sft_data.py.
+def test_competition_math_is_not_a_pretraining_source():
+    # Instruction-tuning data must never be in the pretraining mixture. The SFT entry
+    # that used to hold it was dropped: hendrycks/competition_math no longer exists on
+    # the Hub, and numinamath_cot covers the same material with chain-of-thought.
     assert "competition_math" not in prepare_data.DATASET_SOURCES
     assert "competition_math" not in prepare_data.DOMAIN_SAMPLING_WEIGHTS
 
     from scripts.data import download_sft_data
 
-    assert "competition_math_sft" in download_sft_data.SOURCES
-    cfg = download_sft_data.SOURCES["competition_math_sft"]
-    assert cfg["hf_name"] == "hendrycks/competition_math"
+    assert "competition_math_sft" not in download_sft_data.SOURCES
+
+
+def test_cot_collection_asks_for_a_config_that_exists():
+    """The parquet-conversion branch exposes one config named "default".
+
+    Requesting the upstream name ("en") raises BuilderConfig not found, which the
+    download loop swallows — the source reports 0 rows instead of failing loudly.
+    """
+    from scripts.data import download_sft_data
+
+    cfg = download_sft_data.SOURCES["cot_collection"]
+
+    assert cfg["revision"] == "refs/convert/parquet"
+    assert cfg["hf_subset"] == "default"
 
 
 def test_sft_only_sources_excluded_from_pretraining():

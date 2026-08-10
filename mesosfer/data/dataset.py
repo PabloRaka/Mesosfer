@@ -70,11 +70,9 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=Tr
 
     # Default: merge primary + auxiliary directories
     primary_dir = DATA_DIR
-
-    # Legacy fallback: ClimbMix dir doesn't exist, try old FinewebEdu dir
-    if not os.path.exists(primary_dir):
-        if warn_on_legacy:
-            _print_legacy_warning(primary_dir)
+    primary_missing = not os.path.exists(primary_dir)
+    if primary_missing:
+        # Legacy fallback: ClimbMix dir doesn't exist, try old FinewebEdu dir
         primary_dir = os.path.join(base_dir, "base_data")
 
     primary_files = _list_parquet_in_dir(primary_dir)
@@ -89,6 +87,13 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=Tr
                     aux_files.extend(found)
                     if warn_on_legacy:  # also acts as the rank-0-train flag
                         print(f"  ✓ Merged auxiliary parquet dir: {aux_dir} ({len(found)} shards)")
+
+    # Only nag about the missing ClimbMix download when there is genuinely nothing to
+    # train on. A prepare_data corpus in an auxiliary dir is a complete dataset in its
+    # own right — telling that user to download ClimbMix and retrain the tokenizer would
+    # dilute their mixture and move the validation shard off their own distribution.
+    if primary_missing and warn_on_legacy and not aux_files:
+        _print_legacy_warning(DATA_DIR)
 
     # Auxiliary shards come first, then primary. This keeps the validation
     # shard (always the LAST primary file) consistent across runs.

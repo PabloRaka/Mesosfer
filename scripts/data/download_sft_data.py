@@ -156,17 +156,10 @@ SOURCES = {
         "gated": False,
     },
     # -------------------------------------------------------------------------
-    # Competition Math SFT — step-by-step math reasoning
-    # HF Link: https://huggingface.co/datasets/hendrycks/competition_math
-    "competition_math_sft": {
-        "hf_name": "hendrycks/competition_math",
-        "split": "train",
-        "streaming": True,
-        "format": "instruction_answer",
-        "output_file": "competition_math_sft.jsonl",
-        "max_rows": 10_000,
-        "gated": False,
-    },
+    # NOTE: competition_math_sft (hendrycks/competition_math) was removed — the repo no
+    # longer exists on the Hub (DatasetNotFoundError, not a permission problem). It was
+    # redundant anyway: numinamath_cot supplies competition-level maths with explicit
+    # chain-of-thought, which the instruction_answer converter here could not produce.
     # -------------------------------------------------------------------------
     # Magpie Reasoning V2 — 250K high-quality reasoning pairs from DeepSeek-R1-Llama
     # HF Link: https://huggingface.co/datasets/Magpie-Align/Magpie-Reasoning-V2-250K-CoT-Deepseek-R1-Llama-70B
@@ -321,7 +314,10 @@ SOURCES = {
     # HF Link: https://huggingface.co/datasets/kaist-ai/CoT-Collection
     "cot_collection": {
         "hf_name": "kaist-ai/CoT-Collection",
-        "hf_subset": "en",
+        # The auto-converted parquet branch names its single config "default"; asking for
+        # the upstream config name ("en") raises BuilderConfig 'en' not found and the
+        # source silently yields zero rows.
+        "hf_subset": "default",
         "revision": "refs/convert/parquet",
         "split": "train",
         "streaming": True,

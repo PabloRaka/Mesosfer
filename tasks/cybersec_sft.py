@@ -288,12 +288,6 @@ class AlpacaIndonesianSFT(RobustCustomJSON):
         super().__init__(filepath=_sft_path("alpaca_indonesian_sft.jsonl", sft_dir), **kwargs)
 
 
-class CompetitionMathSFT(RobustCustomJSON):
-    """hendrycks/competition_math dataset converted to SFT format."""
-    def __init__(self, sft_dir=None, **kwargs):
-        super().__init__(filepath=_sft_path("competition_math_sft.jsonl", sft_dir), **kwargs)
-
-
 class MagpieReasoningSFT(RobustCustomJSON):
     """Magpie-Reasoning-V2 dataset converted to SFT format."""
     def __init__(self, sft_dir=None, **kwargs):
@@ -395,7 +389,6 @@ def build_cybersec_sft_tasks(
     trendyol_cyber_epochs: int = 1,
     tiamz_cybersec_epochs: int = 2,
     alpaca_indonesian_epochs: int = 1,
-    competition_math_epochs: int = 2,
     magpie_reasoning_epochs: int = 1,
     open_thoughts_epochs: int = 1,
     hermes_func_calling_epochs: int = 2,
@@ -484,8 +477,6 @@ def build_cybersec_sft_tasks(
         tasks.append(TiamzCybersecSFT(sft_dir=sft_dir))
     for _ in range(alpaca_indonesian_epochs):
         tasks.append(AlpacaIndonesianSFT(sft_dir=sft_dir))
-    for _ in range(competition_math_epochs):
-        tasks.append(CompetitionMathSFT(sft_dir=sft_dir))
     for _ in range(magpie_reasoning_epochs):
         tasks.append(MagpieReasoningSFT(sft_dir=sft_dir))
     for _ in range(open_thoughts_epochs):

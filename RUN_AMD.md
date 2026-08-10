@@ -490,6 +490,15 @@ pip install flash-attn --no-build-isolation
 python -c "import torch; print(torch.version.hip)"
 ```
 
+**`TypeError: expected Tensor() for op: torch.ops.flash_attn._flash_attn_forward.default`**
+
+Raised from generated inductor code (`/tmp/torchinductor_root/.../*.py`) on the first
+training step. TorchInductor cannot handle the ROCm Triton flash-attn custom op and
+emits an `assert_size_stride` against it. `mesosfer/model/flash_attention.py` wraps the
+entry points in `torch.compiler.disable` on ROCm+fa2 so dynamo graph-breaks there; if
+you hit this after changing that file, that guard is what went missing. Setting
+`TORCHDYNAMO_DISABLE=1` also works but gives up compilation for the whole model.
+
 ### Multi-GPU Training Fails
 
 1. **Verify NCCL (ROCm variant):**
