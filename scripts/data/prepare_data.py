@@ -423,11 +423,11 @@ def _source_to_dataset_config(source):
 
 # =============================================================================
 # Domain sampling weights for temperature-based interleaved shuffling.
-# Higher weight = domain appears more frequently in mixed shards.
-# These control the RELATIVE probability of picking a doc from each domain
-# when building mixed shards (not the total volume — that's still max_tokens).
+# A weight is a priority WITHIN its bucket only: it decides which sources of a
+# bucket are drawn more often, never how large the bucket itself is. The size of
+# each bucket is TARGET_DOMAIN_SHARE below.
 #
-# Guidelines:
+# Guidelines (relative, inside a bucket):
 #   2.0  = high priority (exploit, vuln patches, SOC-critical)
 #   1.5  = elevated (structured cyber knowledge)
 #   1.0  = normal (general code, math, instruction)
@@ -436,7 +436,7 @@ def _source_to_dataset_config(source):
 # =============================================================================
 
 DOMAIN_SAMPLING_WEIGHTS = {
-    # Cybersecurity — high priority (~45% effective share)
+    # Cybersecurity
     "all_cve_records":         1.8,
     "circl_vuln_patch":        2.3,
     "primus_nemotron_cc":      2.1,
@@ -464,15 +464,14 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "zeek_scripts":            1.5,
     "brightdata_cybersec":     2.0,  # Real-time threat intel via BrightData Proxy/API
     "primus_seed":             2.2,  # Trend Micro curated cybersecurity seed corpus
-    # General knowledge — retained but capped so it supports broad ability (~10%)
+    # General knowledge (English)
     "climbmix":                0.6,  # very large, keep proportion down
     "wikipedia":               0.5,  # huge corpus, don't let it dominate
     "fineweb_edu":             0.7,
-    # Indonesian — same tier as English general knowledge. Kept low on purpose: weight controls
-    # how often a domain appears in mixed shards, and bursty language switches cause loss spikes.
+    # Indonesian — its own share bucket (see TARGET_DOMAIN_SHARE), weights only split it.
     "wikipedia_id":            0.5,
     "fineweb2_id":             0.6,
-    # Code — important for secure coding (~30% effective share)
+    # Code — important for secure coding
     "secure_code_python":      1.4,
     "secure_code_c":           1.4,
     "secure_code_cpp":         1.2,
@@ -491,10 +490,37 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "metasploit":              1.7,
     "exploitdb":               1.8,
     "swallow_code_v2":         1.3,
-    # Instruction / reasoning (~15% effective share)
+    # Instruction / reasoning
     "finemath":                0.9,
     "nemotron_cc_math":        1.0,  # NVIDIA high-quality math pretraining (score 4+)
 }
+
+# =============================================================================
+# Target share of the mixed corpus per bucket. This is the knob for "how much
+# of each thing does the model see"; DOMAIN_SAMPLING_WEIGHTS only ranks sources
+# inside a bucket. Shares are measured in characters written (≈ tokens) and are
+# renormalized over whichever buckets are actually present in a run, so a
+# --sources subset still gets a sane mix.
+# =============================================================================
+
+TARGET_DOMAIN_SHARE = {
+    "general":       0.40,  # English general knowledge
+    "code":          0.30,
+    "cybersecurity": 0.10,
+    "instruction":   0.10,  # math / reasoning
+    "indonesian":    0.10,
+}
+
+# Indonesian sources are category "general" in DATASET_SOURCES; they get their own
+# share bucket so the Indonesian slice does not eat the English general budget.
+INDONESIAN_SOURCES = ("wikipedia_id", "fineweb2_id")
+
+
+def _source_bucket(name):
+    source = DATASET_SOURCES.get(name)
+    if source is None:
+        return None  # stale name from an old progress.json
+    return "indonesian" if name in INDONESIAN_SOURCES else source["category"]
 
 # =============================================================================
 # Dataset source definitions
@@ -914,6 +940,7 @@ def _category_emoji(category):
         "code": "💻",
         "general": "📚",
         "instruction": "🧠",
+        "indonesian": "🇮🇩",
     }
     return emoji_map.get(category, "📋")
 
@@ -2270,15 +2297,15 @@ def print_dry_run_summary(args, source_names, output_dir):
     print(f"  Sources: {len(source_names)}")
     print()
 
-    category_caps = defaultdict(int)
+    bucket_caps = defaultdict(int)
     for name in source_names:
         src = DATASET_SOURCES[name]
-        cat = src["category"]
+        cat = _source_bucket(name)
         emoji = _category_emoji(cat)
         weight = DOMAIN_SAMPLING_WEIGHTS.get(name, 1.0)
         cap = _effective_source_cap_tokens(src)
         cap_label = f"~{cap / 1e6:.0f}M tokens" if isinstance(cap, int) else "all available"
-        category_caps[cat] += cap if isinstance(cap, int) else 0
+        bucket_caps[cat] += cap if isinstance(cap, int) else 0
 
         local_label = ""
         if src.get("source_type") == "local_files":
@@ -2286,21 +2313,17 @@ def print_dry_run_summary(args, source_names, output_dir):
 
         print(f"  {emoji} {name:28s} | w={weight:.1f} | {cap_label:14s}{local_label} | {src['description']}")
 
-    total_cap = sum(category_caps.values())
-    if total_cap > 0:
+    if bucket_caps:
+        target_total = sum(TARGET_DOMAIN_SHARE.get(b, 0.0) for b in bucket_caps) or 1.0
         print()
-        print("  Approx target by category:")
-        for cat in ["cybersecurity", "code", "general", "instruction"]:
-            tokens = category_caps.get(cat, 0)
-            if tokens <= 0:
-                continue
-            pct = 100 * tokens / total_cap
-            emoji = _category_emoji(cat)
-            print(f"  {emoji} {cat.capitalize():15s}: ~{tokens:,} tokens ({pct:.1f}%)")
-
-        cyber_plus_code = category_caps.get("cybersecurity", 0) + category_caps.get("code", 0)
-        pct = 100 * cyber_plus_code / total_cap
-        print(f"  Cybersecurity + secure code: ~{cyber_plus_code:,} tokens ({pct:.1f}%)")
+        print("  Planned mix (target share of --max-tokens vs what the sources can supply):")
+        for bucket, cap in sorted(bucket_caps.items()):
+            share = TARGET_DOMAIN_SHARE.get(bucket, 0.0) / target_total
+            emoji = _category_emoji(bucket)
+            want = f"~{int(args.max_tokens * share):,} tokens" if args.max_tokens else "budget-limited"
+            short = "  ⚠️  under-supplied" if args.max_tokens and cap < args.max_tokens * share else ""
+            print(f"  {emoji} {bucket.capitalize():15s}: {100 * share:5.1f}% | want {want:>20s} | "
+                  f"available ~{cap:,} tokens{short}")
     print()
 
 # =============================================================================
@@ -2320,6 +2343,38 @@ def _build_sampling_probs(source_names, temperature=1.0):
         raw = [w ** (1.0 / temperature) for w in raw]
     total = sum(raw)
     return [w / total for w in raw]
+
+
+def _build_bucket_samplers(source_names, temperature=1.0):
+    """Group sources by share bucket, each with its own intra-bucket probabilities."""
+    grouped = defaultdict(list)
+    for name in source_names:
+        grouped[_source_bucket(name)].append(name)
+    return {b: (names, _build_sampling_probs(names, temperature)) for b, names in grouped.items()}
+
+
+def _pick_bucket(samplers, stats):
+    """Pick the bucket furthest below its target share of everything written so far.
+
+    Greedy deficit selection instead of one flat weighted draw: it keeps the realized
+    mix on target even though sources differ wildly in document length, and it makes
+    the remaining buckets absorb the share of a bucket that runs dry.
+    """
+    written_by_bucket = defaultdict(int)
+    for name, s in stats.items():
+        written_by_bucket[_source_bucket(name)] += s["chars"]
+    written = sum(written_by_bucket.values()) or 1
+    target_total = sum(TARGET_DOMAIN_SHARE.get(b, 0.0) for b in samplers) or 1.0
+    return max(samplers, key=lambda b: TARGET_DOMAIN_SHARE.get(b, 0.0) / target_total
+               - written_by_bucket[b] / written)
+
+
+def _expected_source_share(name, temperature=1.0):
+    """Fraction of the whole corpus a single source is expected to get."""
+    bucket = _source_bucket(name)
+    peers = [n for n in DATASET_SOURCES if _source_bucket(n) == bucket]
+    probs = dict(zip(peers, _build_sampling_probs(peers, temperature)))
+    return TARGET_DOMAIN_SHARE.get(bucket, 0.0) * probs[name]
 
 
 def interleaved_shuffle_main(args, source_names, output_dir):
@@ -2405,7 +2460,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
 
     # Active sources (those not yet exhausted)
     active_sources = list(source_names)
-    probs = _build_sampling_probs(active_sources, temperature)
+    samplers = _build_bucket_samplers(active_sources, temperature)
 
     current_shard = []
     exhausted_count = 0
@@ -2414,6 +2469,8 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     print("  🔀 INTERLEAVED SHUFFLE MODE")
     print(f"  Cluster size: {cluster_size} | Temperature: {temperature}")
     print(f"  Active sources: {len(active_sources)}")
+    print("  Target mix: " + " | ".join(
+        f"{b} {100 * TARGET_DOMAIN_SHARE.get(b, 0.0):.0f}%" for b in sorted(samplers)))
     print()
 
     while active_sources:
@@ -2421,8 +2478,10 @@ def interleaved_shuffle_main(args, source_names, output_dir):
             logger.info("Global --max-tokens limit reached.")
             break
 
-        # Pick a source using weighted sampling
-        chosen_name = rng.choices(active_sources, weights=probs, k=1)[0]
+        # Pick the bucket that is behind on its target share, then a source inside it
+        bucket = _pick_bucket(samplers, stats)
+        bucket_names, bucket_probs = samplers[bucket]
+        chosen_name = rng.choices(bucket_names, weights=bucket_probs, k=1)[0]
         it = source_iters[chosen_name]
 
         # Draw a cluster of docs from the chosen source
@@ -2436,7 +2495,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                 active_sources.remove(chosen_name)
                 del source_iters[chosen_name]
                 if active_sources:
-                    probs = _build_sampling_probs(active_sources, temperature)
+                    samplers = _build_bucket_samplers(active_sources, temperature)
                 exhausted_count += 1
                 break
 
@@ -2525,18 +2584,16 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     print(f"  Time elapsed: {elapsed/60:.1f} minutes")
     print()
 
-    # Calculate tokens by category
-    cat_tokens = {}
-    for cat in ["cybersecurity", "code", "general", "instruction"]:
-        cat_tokens[cat] = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
-                              for n in summary_sources
-                              if DATASET_SOURCES[n]["category"] == cat)
+    # Realized mix vs TARGET_DOMAIN_SHARE
     if total_tokens > 0:
-        for cat in ["cybersecurity", "code", "general", "instruction"]:
-            if cat_tokens[cat] > 0:
-                emoji = _category_emoji(cat)
-                pct = 100 * cat_tokens[cat] / total_tokens
-                print(f"  {emoji} {cat.capitalize():15s}: ~{cat_tokens[cat]:,} tokens ({pct:.1f}%)")
+        for bucket, target in TARGET_DOMAIN_SHARE.items():
+            tokens = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
+                         for n in summary_sources if _source_bucket(n) == bucket)
+            if tokens <= 0:
+                continue
+            emoji = _category_emoji(bucket)
+            pct = 100 * tokens / total_tokens
+            print(f"  {emoji} {bucket.capitalize():15s}: ~{tokens:,} tokens ({pct:.1f}%, target {100 * target:.0f}%)")
     print()
 
     # Final checkpoint, subject to the same threshold as the periodic ones. This used to
@@ -2792,8 +2849,10 @@ def main():
         if args.sample_10k:
             required_shards = 2
         elif args.max_tokens is not None:
-            # Each shard is ~60M tokens. ClimbMix is ~1.5% of the dataset, but we allocate 5% buffer for variance.
-            climbmix_needed = int((args.max_tokens * 0.05) / 60_000_000)
+            # Each shard is ~60M tokens. Download what ClimbMix's slice of the general
+            # bucket actually asks for, plus 20% for variance — a flat 5% guess starved
+            # the general bucket once its target share went up.
+            climbmix_needed = int((args.max_tokens * _expected_source_share("climbmix") * 1.2) / 60_000_000)
             required_shards = max(2, min(climbmix_needed + 2, 171))
         else:
             required_shards = 171
@@ -3035,18 +3094,16 @@ def main():
     print(f"  Time elapsed: {elapsed/60:.1f} minutes")
     print()
 
-    # Calculate tokens by category
-    cat_tokens = {}
-    for cat in ["cybersecurity", "code", "general", "instruction"]:
-        cat_tokens[cat] = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
-                              for n in source_names
-                              if DATASET_SOURCES[n]["category"] == cat)
+    # Realized mix by bucket. Sequential mode has no share control (it drains source by
+    # source), so this is a report, not a target — use the interleaved mode for the mix.
     if total_tokens > 0:
-        for cat in ["cybersecurity", "code", "general", "instruction"]:
-            if cat_tokens[cat] > 0:
-                emoji = _category_emoji(cat)
-                pct = 100 * cat_tokens[cat] / total_tokens
-                print(f"  {emoji} {cat.capitalize():15s}: ~{cat_tokens[cat]:,} tokens ({pct:.1f}%)")
+        for bucket in TARGET_DOMAIN_SHARE:
+            tokens = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
+                         for n in source_names if _source_bucket(n) == bucket)
+            if tokens > 0:
+                emoji = _category_emoji(bucket)
+                print(f"  {emoji} {bucket.capitalize():15s}: ~{tokens:,} tokens "
+                      f"({100 * tokens / total_tokens:.1f}%)")
     print()
 
     if global_chars > global_chars_at_start:

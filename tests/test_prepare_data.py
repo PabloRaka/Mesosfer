@@ -1,6 +1,8 @@
 import sys
 from dataclasses import FrozenInstanceError
 
+import pytest
+
 from scripts.data import prepare_data
 
 
@@ -96,11 +98,41 @@ def test_climbmix_keeps_general_text_without_security_keywords():
 
 
 def test_sampling_probabilities_prefer_cyber_and_local_over_general():
-    source_names = ["local_incident_response", "circl_vuln_patch", "climbmix", "wikipedia"]
-    probs = dict(zip(source_names, prepare_data._build_sampling_probs(source_names)))
+    # Weights rank sources INSIDE a bucket; cross-bucket size is TARGET_DOMAIN_SHARE.
+    cyber = ["local_incident_response", "circl_vuln_patch"]
+    general = ["climbmix", "wikipedia"]
+    cyber_probs = dict(zip(cyber, prepare_data._build_sampling_probs(cyber)))
+    general_probs = dict(zip(general, prepare_data._build_sampling_probs(general)))
 
-    assert probs["local_incident_response"] > probs["climbmix"]
-    assert probs["circl_vuln_patch"] > probs["wikipedia"]
+    assert cyber_probs["circl_vuln_patch"] > cyber_probs["local_incident_response"]
+    assert general_probs["climbmix"] > general_probs["wikipedia"]
+
+
+def test_indonesian_sources_are_their_own_share_bucket():
+    assert prepare_data._source_bucket("wikipedia_id") == "indonesian"
+    assert prepare_data._source_bucket("climbmix") == "general"
+    assert sum(prepare_data.TARGET_DOMAIN_SHARE.values()) == pytest.approx(1.0)
+
+
+def test_bucket_picker_drives_the_mix_to_the_target_shares():
+    """Greedy deficit picking must land on TARGET_DOMAIN_SHARE despite uneven doc sizes."""
+    names = ["climbmix", "wikipedia_id", "secure_code_python", "nvd_cve", "finemath"]
+    samplers = prepare_data._build_bucket_samplers(names)
+    # Wildly different document lengths per bucket — the whole point of char-based deficits.
+    doc_chars = {"climbmix": 4000, "wikipedia_id": 8000, "secure_code_python": 500,
+                 "nvd_cve": 300, "finemath": 2000}
+    stats = {n: {"docs": 0, "chars": 0} for n in names}
+
+    for _ in range(4000):
+        bucket = prepare_data._pick_bucket(samplers, stats)
+        picked = samplers[bucket][0][0]  # single source per bucket here
+        stats[picked]["docs"] += 1
+        stats[picked]["chars"] += doc_chars[picked]
+
+    total = sum(s["chars"] for s in stats.values())
+    for name in names:
+        target = prepare_data.TARGET_DOMAIN_SHARE[prepare_data._source_bucket(name)]
+        assert stats[name]["chars"] / total == pytest.approx(target, abs=0.02)
 
 
 def test_dry_run_exits_before_interleaved_streaming(monkeypatch, tmp_path, capsys):
@@ -120,7 +152,7 @@ def test_dry_run_exits_before_interleaved_streaming(monkeypatch, tmp_path, capsy
     output = capsys.readouterr().out
     assert called is False
     assert "[DRY RUN]" in output
-    assert "Approx target by category" in output
+    assert "Planned mix" in output
     assert "local files" in output
 
 

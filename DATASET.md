@@ -21,30 +21,43 @@ stages of **mesosfer**, kept in sync with the source of truth in code:
 > **Depth 32 config:** `n_embd = 32 × 128 = 4096`, **96K vocab**, ~13.7B total params (legacy VE; ~9.3B with `--ve-layers=4`), ~6.8B scaling params (transformer matrices + lm_head, excl. embeddings).
 > Recommended: `--depth=32 --target-param-data-ratio=10` (~68B, comfortable surplus) or `=15` (~103B, marginal). Use `--ve-layers=4 --grad-checkpoint` to cut memory.
 
-### Pretraining mix by category (sum of `max_tokens`)
+### Depth 16 (`--d16`)
+
+`python -m scripts.data.prepare_data --d16` sizes the corpus to ~15B tokens
+(`n_embd = 16 × 128 = 2048`, ~1.0B scaling params, ratio 15; `--target-param-data-ratio=10`
+gives ~10B). Every bucket has enough supply at that budget — check with `--dry-run --d16`.
+
+### Pretraining mix (`TARGET_DOMAIN_SHARE`)
+
+The interleaved shuffler writes to these shares, measured in characters (≈ tokens):
 
 
-| Category         | Tokens      | Share |
-| :----------------- | :------------ | :------ |
-| Cybersecurity    | ~37.1B      | ~37%  |
-| Code             | ~30.1B      | ~30%  |
-| Reasoning / Math | ~21.0B      | ~21%  |
-| General          | ~15.2B      | ~15%  |
-| **Total**        | **~103.4B** | 100%  |
+| Bucket           | Share | Sources                                              |
+| :----------------- | :------ | :----------------------------------------------------- |
+| General (EN)     | 40%   | `climbmix`, `wikipedia`, `fineweb_edu`               |
+| Code             | 30%   | `secure_code_*`, `code_*`, `metasploit`, `exploitdb` |
+| Cybersecurity    | 10%   | CVE feeds, threat intel, detection rules, local data |
+| Reasoning / Math | 10%   | `finemath`, `nemotron_cc_math`                       |
+| Indonesian       | 10%   | `wikipedia_id`, `fineweb2_id`                        |
 
-> General includes ~3.2B Indonesian (`fineweb2_id`, `wikipedia_id`); the rest is English.
+> Indonesian is its own bucket even though those sources carry `category: "general"`,
+> so the Indonesian slice does not eat the English general budget.
+> Total `max_tokens` available across all sources is still ~103B — the shares decide
+> how the run's budget is divided, `max_tokens` only caps how much a source can give.
 
 ---
 
 ## 2. Pretraining Data
 
-Sampling weights drive temperature-based interleaved shuffling: higher weight = a
-domain appears more frequently in mixed shards. `max_tokens` is the hard upper
-bound on volume per source.
+Each source belongs to a share bucket. `TARGET_DOMAIN_SHARE` decides how big a bucket
+is; a sampling weight only ranks sources **within** a bucket. The shuffler picks the
+bucket that is furthest below its target share, then a source inside it by weight, so
+the realized mix stays on target even though document lengths differ per domain.
+`max_tokens` is the hard upper bound on volume per source.
 
 > **Shuffle config:** `cluster_size=32`, `sampling_temperature=1.2` (reduce domain-burst loss spikes).
 
-### Weight guidelines
+### Weight guidelines (relative, inside a bucket)
 
 - **2.0+ (critical):** Exploit/vuln patches, SOC-critical intel, curated seeds, local security data.
 - **1.5–1.9 (high):** Structured cybersecurity knowledge, CVE feeds, threat intel, advisories, detection rules.
@@ -110,17 +123,17 @@ bound on volume per source.
 | `fineweb_edu`               | General       | 0.7    | 4.0B       | `HuggingFaceFW/fineweb-edu` (`sample-10BT`) | Educational web content.                 |
 | `climbmix`                  | General       | 0.6    | 5.0B       | `karpathy/climbmix-400b-shuffle`            | General pretraining, suppressed.         |
 | `wikipedia`                 | General       | 0.5    | 3.0B       | `wikimedia/wikipedia` (`20231101.en`)       | English Wikipedia, suppressed.           |
-| `fineweb2_id`               | General       | 0.6    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
-| `wikipedia_id`              | General       | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
+| `fineweb2_id`               | Indonesian    | 0.6    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
+| `wikipedia_id`              | Indonesian    | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
 
 > **48 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
 
-> 🇮🇩 **Indonesian in pretraining:** `fineweb2_id` + `wikipedia_id` contribute ~3.2B tokens (~3% of the
-> mix). This is deliberately small — it exists so the 96K tokenizer learns real Indonesian sub-words and
-> the base model has a language foundation to build on. The Indonesian SFT sets (Section 3) sit on top of
-> it; SFT alone cannot teach a language the base model never saw during pretraining. Weights are kept at
-> the general-knowledge tier (0.5–0.6) because weight controls how often a domain appears in mixed
-> shards, and bursty language switching is a known loss-spike source.
+> 🇮🇩 **Indonesian in pretraining:** `fineweb2_id` + `wikipedia_id` form their own 10% bucket, so the
+> tokenizer learns real Indonesian sub-words and the base model has a language foundation to build on.
+> The Indonesian SFT sets (Section 3) sit on top of it; SFT alone cannot teach a language the base model
+> never saw during pretraining. The two weights (0.5 / 0.6) only split the bucket between them — the
+> bucket size comes from `TARGET_DOMAIN_SHARE`. Their `max_tokens` (~3.2B combined) is the ceiling, so
+> budgets above ~32B tokens will run this bucket dry and the rest absorbs its share.
 
 > ⚠️ **Loss-spike prevention:** Raw logs (`.log`, `.xml`, `.json`) are converted to natural-language
 > narratives by `convert_logs_to_nl.py` before pretraining:
