@@ -33,7 +33,6 @@ from collections.abc import Mapping
 from fnmatch import fnmatch
 from pathlib import Path
 
-import pandas as pd
 try:
     from datasets import load_dataset
 except ModuleNotFoundError:
@@ -1115,6 +1114,7 @@ for _source in _source_definitions():
 
 CHARS_PER_TOKEN = 4.0
 CHECKPOINT_EVERY_BYTES = 10 * 1024 * 1024 * 1024  # 10 GB
+SHARD_BUFFER_MAX_CHARS = 256 * 1024 * 1024  # flush current_shard early past this many buffered chars
 NVD_FEED_BASE_URL = "https://nvd.nist.gov/feeds/json/cve/2.0"
 
 # =============================================================================
@@ -2263,10 +2263,13 @@ def write_shard(texts, shard_path):
 
     Handles permission errors gracefully so the pipeline can continue.
     """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     tmp_path = shard_path + ".tmp"
-    df = pd.DataFrame({"text": texts})
+    table = pa.Table.from_pydict({"text": texts})
     try:
-        df.to_parquet(tmp_path, index=False, engine="pyarrow")
+        pq.write_table(table, tmp_path)
         os.replace(tmp_path, shard_path)
         logger.info(f"  Wrote {len(texts):,} docs to {shard_path}")
     except PermissionError as e:
@@ -2376,15 +2379,30 @@ def write_val_part(docs, output_dir, part_idx):
     return part_idx + 1
 
 def write_final_val_shard(output_dir, shard_path):
+    """Stream every .valpart into the final val shard one part at a time, so the
+    whole validation set (can be 100M+ tokens) never sits in RAM at once."""
+    import pyarrow.parquet as pq
+
     val_parts = list_val_part_files(output_dir)
     if not val_parts:
         logger.warning("  No validation docs collected; validation shard will not be written.")
         return False
 
-    val_docs = []
-    for path in val_parts:
-        val_docs.extend(pd.read_parquet(path)["text"].tolist())
-    write_shard(val_docs, shard_path)
+    tmp_path = shard_path + ".tmp"
+    total_docs = 0
+    writer = None
+    try:
+        for path in val_parts:
+            table = pq.read_table(path, columns=["text"])
+            if writer is None:
+                writer = pq.ParquetWriter(tmp_path, table.schema)
+            writer.write_table(table)
+            total_docs += table.num_rows
+    finally:
+        if writer is not None:
+            writer.close()
+    os.replace(tmp_path, shard_path)
+    logger.info(f"  Wrote {total_docs:,} docs to {shard_path}")
 
     for path in val_parts:
         os.remove(path)
@@ -2694,6 +2712,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     consecutive_cyber_skips = 0
 
     current_shard = []
+    current_shard_chars = 0
     exhausted_count = 0
 
     print()
@@ -2747,6 +2766,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                 break
 
             current_shard.append(text)
+            current_shard_chars += len(text)
             stats[chosen_name]["docs"] += 1
             stats[chosen_name]["chars"] += len(text)
             global_chars += len(text)
@@ -2755,8 +2775,8 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                 leaf_stats[cyber_leaf]["docs"] += 1
                 leaf_stats[cyber_leaf]["chars"] += len(text)
 
-            # Flush shard when full
-            if len(current_shard) >= args.shard_size:
+            # Flush shard when full (by doc count or buffered bytes, whichever hits first)
+            if len(current_shard) >= args.shard_size or current_shard_chars >= SHARD_BUFFER_MAX_CHARS:
                 # Shuffle WITHIN the shard for extra randomness
                 rng.shuffle(current_shard)
                 train_docs, val_docs = split_train_val_docs(current_shard, args.val_ratio)
@@ -2766,6 +2786,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                     shard_idx += 1
                 val_part_idx = write_val_part(val_docs, output_dir, val_part_idx)
                 current_shard = []
+                current_shard_chars = 0
 
                 current_bytes = get_total_parquet_bytes(output_dir)
                 if current_bytes - bytes_at_last_checkpoint >= checkpoint_every_bytes:
@@ -3235,6 +3256,7 @@ def main():
         completed_sources = []
         
     current_shard = []
+    current_shard_chars = 0
     bytes_at_last_checkpoint = prev_progress.get("bytes_at_last_checkpoint", 0) if resuming else 0
     checkpoint_number = prev_progress.get("checkpoint_number", 0) if resuming else 0
     val_part_idx = prev_progress.get("next_val_part_idx", len(list_val_part_files(output_dir))) if resuming else 0
@@ -3277,11 +3299,12 @@ def main():
                 break
 
             current_shard.append(text)
+            current_shard_chars += len(text)
             stats[source_name]["docs"] += 1
             stats[source_name]["chars"] += len(text)
             global_chars += len(text)
 
-            if len(current_shard) >= args.shard_size:
+            if len(current_shard) >= args.shard_size or current_shard_chars >= SHARD_BUFFER_MAX_CHARS:
                 train_docs, val_docs = split_train_val_docs(current_shard, args.val_ratio)
                 shard_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.parquet")
                 if train_docs:
@@ -3289,6 +3312,7 @@ def main():
                     shard_idx += 1
                 val_part_idx = write_val_part(val_docs, output_dir, val_part_idx)
                 current_shard = []
+                current_shard_chars = 0
 
                 current_bytes = get_total_parquet_bytes(output_dir)
                 if current_bytes - bytes_at_last_checkpoint >= checkpoint_every_bytes:

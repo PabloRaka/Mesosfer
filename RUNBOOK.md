@@ -65,6 +65,14 @@ same command after an interruption. Check progress any time:
 python -m scripts.data.prepare_data --status
 ```
 
+**8 GB RAM box:** `--sources a,b,c` prepares a subset of sources and resumes cleanly, so
+a small machine can do the corpus in batches instead of holding ~52 concurrent
+HuggingFace streaming iterators open at once (each one holds an open response and a
+parquet row-group buffer — that concurrency is the memory floor, and no amount of
+shard-size tuning reduces it). Raise `--checkpoint-every-gb` (default 10) if the periodic
+tar.gz snapshots of the output dir are also a concern — note `0` is rejected by argparse
+validation (`--checkpoint-every-gb must be > 0`), it does not disable snapshots.
+
 ### 1b. CPU box — train the tokenizer
 
 The tokenizer reads the corpus you just built, so it must be trained here, and the same
