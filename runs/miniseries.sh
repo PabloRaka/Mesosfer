@@ -68,6 +68,7 @@ for d in "${DEPTHS[@]}"; do
 
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.train.base_train -- \
         --depth=$d \
+        --aspect-ratio=64 \
         --run="${WANDB_RUN}_d${d}" \
         --model-tag="${TAG}" \
         --core-metric-every=999999 \

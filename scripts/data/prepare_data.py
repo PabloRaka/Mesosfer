@@ -2281,7 +2281,25 @@ def print_status(output_dir):
         print("  Overall status        : 🔄 IN PROGRESS (re-run to resume)")
     print()
 
+def _local_files_estimated_tokens(source_config):
+    """Real token supply of a local_files source, from bytes actually on disk."""
+    total_bytes = sum(os.path.getsize(p) for p in _resolve_local_files(source_config))
+    return int(total_bytes / CHARS_PER_TOKEN)
+
+
 def _effective_source_cap_tokens(source_config):
+    """What a source can really supply, for dry-run reporting.
+
+    local_files sources declare a max_tokens headroom cap (1.2-1.44B) far larger than
+    the bundled files on disk actually contain, and pdf_manifest sources have no
+    downloader at all (stream_dataset_texts no-ops for them) — both would otherwise
+    make the dry-run report supply that doesn't exist.
+    """
+    source_type = source_config.get("source_type")
+    if source_type == "local_files":
+        return _local_files_estimated_tokens(source_config)
+    if source_type == "pdf_manifest":
+        return 0
     return source_config.get("max_tokens")
 
 def print_dry_run_summary(args, source_names, output_dir):
@@ -2304,14 +2322,21 @@ def print_dry_run_summary(args, source_names, output_dir):
         emoji = _category_emoji(cat)
         weight = DOMAIN_SAMPLING_WEIGHTS.get(name, 1.0)
         cap = _effective_source_cap_tokens(src)
-        cap_label = f"~{cap / 1e6:.0f}M tokens" if isinstance(cap, int) else "all available"
+        if not isinstance(cap, int):
+            cap_label = "all available"
+        elif src.get("source_type") == "pdf_manifest":
+            cap_label = "0 (no downloader yet)"
+        elif cap < 1_000_000:
+            cap_label = f"~{cap / 1e3:.0f}K tokens"
+        else:
+            cap_label = f"~{cap / 1e6:.0f}M tokens"
         bucket_caps[cat] += cap if isinstance(cap, int) else 0
 
         local_label = ""
         if src.get("source_type") == "local_files":
             local_label = f" | {count_local_files(src)} local files"
 
-        print(f"  {emoji} {name:28s} | w={weight:.1f} | {cap_label:14s}{local_label} | {src['description']}")
+        print(f"  {emoji} {name:28s} | w={weight:.1f} | {cap_label:22s}{local_label} | {src['description']}")
 
     if bucket_caps:
         target_total = sum(TARGET_DOMAIN_SHARE.get(b, 0.0) for b in bucket_caps) or 1.0
@@ -2367,14 +2392,6 @@ def _pick_bucket(samplers, stats):
     target_total = sum(TARGET_DOMAIN_SHARE.get(b, 0.0) for b in samplers) or 1.0
     return max(samplers, key=lambda b: TARGET_DOMAIN_SHARE.get(b, 0.0) / target_total
                - written_by_bucket[b] / written)
-
-
-def _expected_source_share(name, temperature=1.0):
-    """Fraction of the whole corpus a single source is expected to get."""
-    bucket = _source_bucket(name)
-    peers = [n for n in DATASET_SOURCES if _source_bucket(n) == bucket]
-    probs = dict(zip(peers, _build_sampling_probs(peers, temperature)))
-    return TARGET_DOMAIN_SHARE.get(bucket, 0.0) * probs[name]
 
 
 def interleaved_shuffle_main(args, source_names, output_dir):
@@ -2702,7 +2719,9 @@ def _get_vocab_size():
                     return len(vocab)
     except Exception:
         pass
-    return 96000  # Default fallback
+    return 98304  # Default fallback — must match tok_train.py's --vocab-size default,
+    # since prepare_data runs before tok_train in the pipeline and there is no
+    # tokenizer on disk yet for this to read.
 
 
 def has_ve(layer_idx, n_layer, ve_layers=-1):
@@ -2842,23 +2861,21 @@ def main():
         download_climbmix_shards(args.download_climbmix, args.download_workers)
         return
 
-    # Automatically ensure ClimbMix shards are present before preparing cybersecurity/code datasets
+    # Automatically ensure a ClimbMix shard is present before preparing cybersecurity/code
+    # datasets. Deliberately minimal: mesosfer/data/dataset.py treats base_data_climbmix as
+    # the PRIMARY corpus and merges it ADDITIVELY with the interleaved output (it only needs
+    # this dir to exist so the LAST primary file can serve as the validation shard) — but
+    # climbmix is ALSO one of the interleaved mix's own general-bucket sources (see
+    # DATASET_SOURCES below), streamed fresh from HF. Sizing this pre-download off the token
+    # budget (the old behaviour) stacked extra raw general-English text on top of the
+    # carefully-proportioned mix and silently diluted TARGET_DOMAIN_SHARE.
     if not args.dry_run and not args.status:
         climbmix_dir = os.path.join(base_dir, "base_data_climbmix")
         existing_shards = [f for f in os.listdir(climbmix_dir) if f.endswith('.parquet')] if os.path.exists(climbmix_dir) else []
-        if args.sample_10k:
-            required_shards = 2
-        elif args.max_tokens is not None:
-            # Each shard is ~60M tokens. Download what ClimbMix's slice of the general
-            # bucket actually asks for, plus 20% for variance — a flat 5% guess starved
-            # the general bucket once its target share went up.
-            climbmix_needed = int((args.max_tokens * _expected_source_share("climbmix") * 1.2) / 60_000_000)
-            required_shards = max(2, min(climbmix_needed + 2, 171))
-        else:
-            required_shards = 171
+        required_shards = 2
         if len(existing_shards) < required_shards:
             shards_to_download = required_shards - 1
-            logger.info(f"  ℹ️ ClimbMix general pretraining shards not found or incomplete (need {required_shards} shards). Downloading baseline {shards_to_download} shards automatically...")
+            logger.info(f"  ℹ️ ClimbMix validation shard not found. Downloading minimal baseline ({required_shards} shards)...")
             download_climbmix_shards(shards_to_download, args.download_workers)
 
     output_dir = os.path.join(base_dir, args.output_dir)

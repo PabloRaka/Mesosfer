@@ -256,8 +256,8 @@ Common arguments for `scripts/train/base_train.py`:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--depth` | 20 | Transformer depth |
-| `--aspect-ratio` | 64 | model_dim = depth * aspect_ratio |
+| `--depth` | 32 | Transformer depth |
+| `--aspect-ratio` | 128 | model_dim = depth * aspect_ratio |
 | `--head-dim` | 128 | Attention head dimension |
 | `--max-seq-len` | 2048 | Context length |
 | `--device-batch-size` | 32 | Per-GPU batch size |

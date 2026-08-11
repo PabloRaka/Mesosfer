@@ -419,3 +419,86 @@ def test_checkpoint_every_gb_can_disable_checkpoints(monkeypatch, tmp_path, caps
     capsys.readouterr()
 
     assert calls == [], f"checkpoint written despite a 9999 GB threshold: {calls}"
+
+
+# ---------------------------------------------------------------------------
+# ClimbMix pre-download must stay pinned to a bare-minimum validation shard.
+#
+# dataset.py merges base_data_climbmix ADDITIVELY with the interleaved output
+# (it only needs the dir to exist for its last-file validation shard), while
+# climbmix is ALSO streamed fresh as one of the interleaved general-bucket
+# sources. Sizing the pre-download off --max-tokens double-counted it and
+# diluted TARGET_DOMAIN_SHARE.
+# ---------------------------------------------------------------------------
+
+def test_climbmix_predownload_is_pinned_to_minimum_regardless_of_budget(monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(prepare_data, "get_base_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(prepare_data, "download_climbmix_shards", lambda n, w: calls.append(n))
+    monkeypatch.setattr(prepare_data, "interleaved_shuffle_main", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["prepare_data.py", "--max-tokens", "15000000000"])
+
+    prepare_data.main()
+    capsys.readouterr()
+
+    # 1 requested shard + the always-appended validation shard = 2 total, no matter
+    # how large the budget is.
+    assert calls == [1]
+
+
+def test_expected_source_share_is_gone():
+    """The only caller of _expected_source_share was the old budget-scaled
+    ClimbMix sizing logic; it must not linger as dead code."""
+    assert not hasattr(prepare_data, "_expected_source_share")
+
+
+# ---------------------------------------------------------------------------
+# Dry-run supply reporting must reflect what a source can really deliver.
+# ---------------------------------------------------------------------------
+
+def test_local_files_estimated_tokens_uses_real_disk_bytes(tmp_path):
+    local_file = tmp_path / "a.jsonl"
+    local_file.write_text("y" * 400, encoding="utf-8")  # 400 bytes
+
+    tokens = prepare_data._local_files_estimated_tokens(
+        {"local_paths": [str(local_file)]}
+    )
+
+    assert tokens == 100  # 400 bytes / CHARS_PER_TOKEN (4.0)
+
+
+def test_pdf_manifest_sources_report_zero_supply_not_declared_cap():
+    for name in ("academic_security_papers", "threat_report_pdfs"):
+        src = prepare_data.DATASET_SOURCES[name]
+        assert src["source_type"] == "pdf_manifest"
+        assert src["max_tokens"] > 0  # declared cap still exists...
+        assert prepare_data._effective_source_cap_tokens(src) == 0  # ...but supplies nothing
+
+
+def test_declared_local_caps_massively_overstate_real_disk_supply():
+    """Regression guard for the dry-run bug: local_files sources declare
+    1.2-1.44B token caps each (~6.48B combined) but the bundled files on disk
+    total well under 1M tokens. The report must use the real number."""
+    local_names = [
+        name for name, cfg in prepare_data.DATASET_SOURCES.items()
+        if cfg.get("source_type") == "local_files"
+    ]
+    assert len(local_names) >= 5
+
+    declared_total = sum(prepare_data.DATASET_SOURCES[n]["max_tokens"] for n in local_names)
+    real_total = sum(
+        prepare_data._effective_source_cap_tokens(prepare_data.DATASET_SOURCES[n])
+        for n in local_names
+    )
+
+    assert declared_total > 6_000_000_000
+    assert real_total < 1_000_000
+
+
+def test_vocab_fallback_matches_tok_train_default(tmp_path, monkeypatch):
+    """prepare_data runs before tok_train in the pipeline, so this fallback (no
+    tokenizer on disk yet) is the vocab size actually used to size the dataset —
+    it must match tok_train.py's --vocab-size default (98304), not drift from it."""
+    monkeypatch.setattr(prepare_data, "get_base_dir", lambda: str(tmp_path))
+
+    assert prepare_data._get_vocab_size() == 98304

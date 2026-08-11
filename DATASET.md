@@ -45,6 +45,15 @@ The interleaved shuffler writes to these shares, measured in characters (≈ tok
 > Total `max_tokens` available across all sources is still ~103B — the shares decide
 > how the run's budget is divided, `max_tokens` only caps how much a source can give.
 
+> ⚠️ **`base_data_climbmix` stays deliberately tiny (2 shards).** `mesosfer/data/dataset.py`
+> treats that directory as the *primary* corpus and merges it **additively** with the
+> prepared mix — it is not interleaved. But `climbmix` is already a general-bucket source
+> inside the mix, streamed fresh from HF. Every extra pre-downloaded shard is therefore raw
+> general-English text stacked on top of the shares above; sizing that download against the
+> token budget (the old behaviour) pushed general to ~49% and cybersecurity down to ~8.6%.
+> Two shards is what the dataloader needs to have a validation shard, and nothing more.
+> `--download-climbmix N` still downloads whatever you ask for, deliberately.
+
 ---
 
 ## 2. Pretraining Data
@@ -127,6 +136,12 @@ the realized mix stays on target even though document lengths differ per domain.
 | `wikipedia_id`              | Indonesian    | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
 
 > **48 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
+
+> ⚠️ **Two `Max Tokens` columns above are headroom, not supply.** The five `local_*` sources
+> declare 1.2–1.44B each but the bundled files hold ~333K tokens combined, and the two
+> `pdf_manifest` sources have no downloader yet (`stream_dataset_texts` no-ops them), so they
+> supply nothing. `--dry-run` reports what these can really give — read it, not this table,
+> when checking whether the cybersecurity bucket can fill its share.
 
 > 🇮🇩 **Indonesian in pretraining:** `fineweb2_id` + `wikipedia_id` form their own 10% bucket, so the
 > tokenizer learns real Indonesian sub-words and the base model has a language foundation to build on.
