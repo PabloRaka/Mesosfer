@@ -50,6 +50,33 @@ def test_val_split_is_unaffected(tmp_path, monkeypatch):
     assert seen == ["shard 19"]
 
 
+def test_val_prefixed_file_is_selected_regardless_of_position():
+    """prepare_data's val_shard.parquet must win over the last-file fallback, and it
+    can land anywhere in the aux+primary merged list (list_parquet_files puts aux dirs
+    first), not just at the end.
+    """
+    paths = ["aux/shard_00000.parquet", "aux/val_shard.parquet", "primary/shard_00001.parquet"]
+
+    assert dataset.split_parquet_paths(paths, "val") == ["aux/val_shard.parquet"]
+    train = dataset.split_parquet_paths(paths, "train")
+    assert "aux/val_shard.parquet" not in train
+    assert sorted(train) == ["aux/shard_00000.parquet", "primary/shard_00001.parquet"]
+
+
+def test_no_val_prefixed_file_falls_back_to_legacy_last_file():
+    """Corpora prepared before val_shard.parquet existed have no way to name their
+    validation shard, so this must reproduce the old last-file behavior exactly:
+    val is the last file, train is everything else (shuffled with the fixed seed).
+    """
+    paths = [f"shard_{i:05d}.parquet" for i in range(5)]
+    import random
+    expected_train = paths[:-1]
+    random.Random(dataset.SHARD_SHUFFLE_SEED).shuffle(expected_train)
+
+    assert dataset.split_parquet_paths(paths, "val") == paths[-1:]
+    assert dataset.split_parquet_paths(paths, "train") == expected_train
+
+
 def test_pretrain_dataloader_uses_the_same_order():
     """base_train reads through dataloader._document_batches, not parquets_iter_batched.
 

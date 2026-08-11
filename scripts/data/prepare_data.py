@@ -2150,6 +2150,13 @@ def val_part_path(output_dir, part_idx):
 def list_val_part_files(output_dir):
     return sorted(glob.glob(os.path.join(output_dir, "val_part_*.valpart")))
 
+def val_shard_path(output_dir):
+    # Fixed name, deliberately outside the shard_{idx:05d} numbering so the reader
+    # (mesosfer/data/dataset.py) can identify it by name instead of by position, and so
+    # it never consumes a shard_idx slot. Re-running write_shard() to this same path
+    # overwrites the previous val shard rather than leaving old and new side by side.
+    return os.path.join(output_dir, "val_shard.parquet")
+
 def split_train_val_docs(docs, val_ratio=0.05):
     """Split document list into train/val sets.
 
@@ -2561,11 +2568,10 @@ def interleaved_shuffle_main(args, source_names, output_dir):
             shard_idx += 1
         val_part_idx = write_val_part(val_docs, output_dir, val_part_idx)
 
-    # Write final validation shard
+    # Write final validation shard. Fixed filename, not a shard_idx slot — see
+    # val_shard_path().
     if list_val_part_files(output_dir):
-        val_shard_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.parquet")
-        if write_final_val_shard(output_dir, val_shard_path):
-            shard_idx += 1
+        write_final_val_shard(output_dir, val_shard_path(output_dir))
 
     elapsed = time.time() - t0
 
@@ -2993,12 +2999,13 @@ def main():
     global_chars_at_start = global_chars
     reached_global_limit = global_max_chars is not None and global_chars >= global_max_chars
 
-    if reopen_finished_run and shard_idx > 0:
-        last_val_shard = os.path.join(output_dir, f"shard_{shard_idx - 1:05d}.parquet")
+    if reopen_finished_run:
+        # Val shard has a fixed name and never held a shard_idx slot (see
+        # val_shard_path()), so reopening it doesn't touch shard_idx.
+        last_val_shard = val_shard_path(output_dir)
         if os.path.exists(last_val_shard):
             reopened_val_part = val_part_path(output_dir, val_part_idx)
             os.replace(last_val_shard, reopened_val_part)
-            shard_idx -= 1
             val_part_idx += 1
             logger.info(f"Reopened previous validation shard for extension: {reopened_val_part}")
 
@@ -3077,10 +3084,9 @@ def main():
 
         val_part_idx = write_val_part(val_docs, output_dir, val_part_idx)
 
+    # Fixed filename, not a shard_idx slot — see val_shard_path().
     if list_val_part_files(output_dir):
-        val_shard_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.parquet")
-        if write_final_val_shard(output_dir, val_shard_path):
-            shard_idx += 1
+        write_final_val_shard(output_dir, val_shard_path(output_dir))
 
     elapsed = time.time() - t0
 
