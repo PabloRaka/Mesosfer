@@ -362,6 +362,29 @@ def test_second_batch_appends_instead_of_overwriting(monkeypatch, tmp_path, caps
         assert progress_second["stats"].get(name, {}).get("docs")
 
 
+def test_val_shard_has_fixed_name_and_does_not_consume_shard_idx(monkeypatch, tmp_path, capsys):
+    """The validation shard must be named val_shard.parquet, not shard_{idx:05d}.parquet
+    (see mesosfer/data/dataset.py's split_parquet_paths), and writing it must not advance
+    next_shard_idx — that index is only for real training shards.
+    """
+    _patch_streaming(monkeypatch)
+    first, second = _two_batches()
+    out = str(tmp_path)
+
+    prepare_data.interleaved_shuffle_main(_Args(), list(first), out)
+    capsys.readouterr()
+
+    assert (tmp_path / "val_shard.parquet").exists()
+    assert _shard_count(tmp_path) == prepare_data.load_progress(out)["next_shard_idx"]
+
+    # A second batch collects new val docs and rewrites the same val shard — it must
+    # overwrite val_shard.parquet in place, not add a second file under a new name.
+    prepare_data.interleaved_shuffle_main(_Args(), list(second), out)
+    capsys.readouterr()
+    assert len(list(tmp_path.glob("val_shard*.parquet"))) == 1
+    assert _shard_count(tmp_path) == prepare_data.load_progress(out)["next_shard_idx"]
+
+
 def test_already_completed_sources_are_skipped(monkeypatch, tmp_path, capsys):
     _patch_streaming(monkeypatch)
     first, _ = _two_batches()

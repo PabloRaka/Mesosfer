@@ -37,8 +37,11 @@ DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
 # Auxiliary dataset directories that are auto-merged if they exist.
 # These are produced by other pipelines (e.g. scripts/data/prepare_data.py).
 # Order matters: directories listed first are placed earlier in the parquet
-# sequence, so the validation shard is always taken from the LAST file of the
-# LAST directory (typically ClimbMix's shard_06542.parquet).
+# sequence. Validation shards are identified by name (a `val_` prefix, written
+# by prepare_data.py's val_shard_path()) via split_parquet_paths(), not by
+# position — any directory's val_*.parquet is picked up. Corpora written before
+# that convention (no val_* file anywhere) fall back to the last file in this
+# merged list, which is typically ClimbMix's shard_06542.parquet.
 AUXILIARY_DATA_DIRS = [
     os.path.join(base_dir, "base_data_cybersecurity"),          # output of scripts.data.prepare_data
     os.path.join(base_dir, "base_data_cybersecurity_sample"),   # sample output of --sample-10k
@@ -53,8 +56,9 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=Tr
 
     By default this merges the primary ClimbMix directory with any auxiliary
     directories listed in AUXILIARY_DATA_DIRS that exist on disk. Auxiliary
-    shards are placed BEFORE primary shards so the last file (validation shard)
-    always comes from ClimbMix.
+    shards are placed BEFORE primary shards. split_parquet_paths() picks the
+    validation file(s) out of this list by name (`val_*`), so directory order
+    here no longer determines which shard is validation.
 
     Args:
         data_dir: if provided, only read from this single directory (no merge)
@@ -95,8 +99,7 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=Tr
     if primary_missing and warn_on_legacy and not aux_files:
         _print_legacy_warning(DATA_DIR)
 
-    # Auxiliary shards come first, then primary. This keeps the validation
-    # shard (always the LAST primary file) consistent across runs.
+    # Auxiliary shards come first, then primary.
     return aux_files + primary_files
 
 
@@ -136,7 +139,19 @@ SHARD_SHUFFLE_SEED = 1337
 
 
 def split_parquet_paths(parquet_paths, split):
-    """Split into train/val: val is the last file, train is everything else, shuffled.
+    """Split into train/val.
+
+    Validation files are identified by name: any path whose basename starts with
+    `val_` (written by prepare_data.py's val_shard_path()) is validation, and those
+    are excluded from train regardless of where they sort in the merged
+    aux+primary list. This is what lets a prepare_data corpus's own multi-domain
+    validation shard actually get used as validation, instead of being shuffled
+    into train while the last ClimbMix shard silently stands in for it.
+
+    If no `val_*` file is present (corpora prepared before this convention existed,
+    where the validation shard is indistinguishable from a training shard by name),
+    fall back to the legacy behavior exactly: val is the last file, train is
+    everything else.
 
     prepare_data interleaves sources *within* one run, but each `--sources` batch
     appends its own contiguous block of shards. Filename order is therefore download
@@ -145,9 +160,15 @@ def split_parquet_paths(parquet_paths, split):
     every restart agree on the same permutation.
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
+    val_paths = [p for p in parquet_paths if os.path.basename(p).startswith("val_")]
+    if val_paths:
+        train_paths = [p for p in parquet_paths if p not in val_paths]
+    else:
+        val_paths = parquet_paths[-1:]
+        train_paths = parquet_paths[:-1]
     if split == "val":
-        return parquet_paths[-1:]
-    train_paths = parquet_paths[:-1]  # a copy, safe to shuffle in place
+        return val_paths
+    train_paths = list(train_paths)  # a copy, safe to shuffle in place
     random.Random(SHARD_SHUFFLE_SEED).shuffle(train_paths)
     return train_paths
 
@@ -174,7 +195,7 @@ def strip_notebook_blobs(text):
 def parquets_iter_batched(split, start=0, step=1):
     """
     Iterate through the dataset, in batches of underlying row_groups for efficiency.
-    - split can be "train" or "val". the last parquet file will be val.
+    - split can be "train" or "val". See split_parquet_paths() for how val is selected.
     - start/step are useful for skipping rows in DDP. e.g. start=rank, step=world_size
     """
     parquet_paths = split_parquet_paths(list_parquet_files(), split)
