@@ -29,21 +29,63 @@ gives ~10B). Every bucket has enough supply at that budget — check with `--dry
 
 ### Pretraining mix (`TARGET_DOMAIN_SHARE`)
 
-The interleaved shuffler writes to these shares, measured in characters (≈ tokens):
+`scripts/data/prepare_data.py` has two stage profiles, selected with `--stage
+pretrain|cpt` (default `pretrain`), each summing to 1.0. The interleaved shuffler
+writes to whichever profile is selected, measured in characters (≈ tokens); default
+output dir is `base_data_cybersecurity` for `pretrain`, `base_data_cpt` for `cpt`
+(an explicit `--output-dir` always wins).
 
+Indonesian sources (`wikipedia_id`, `fineweb2_id`) carry `category: "general"` and are
+folded into the `general` bucket in **both** profiles — there is no separate Indonesian
+bucket; their share within `general` comes only from their `DOMAIN_SAMPLING_WEIGHTS`.
+
+#### `--stage pretrain` (`PRETRAIN_TARGET_SHARE`)
 
 | Bucket           | Share | Sources                                              |
 | :----------------- | :------ | :----------------------------------------------------- |
-| General (EN)     | 40%   | `climbmix`, `wikipedia`, `fineweb_edu`               |
-| Code             | 30%   | `secure_code_*`, `code_*`, `metasploit`, `exploitdb` |
-| Cybersecurity    | 10%   | CVE feeds, threat intel, detection rules, local data |
+| General (EN)     | 50%   | `climbmix`, `wikipedia`, `fineweb_edu`, `wikipedia_id`, `fineweb2_id` |
+| Code             | 25%   | `secure_code_*`, `code_*`, `metasploit`, `exploitdb` |
+| Cybersecurity    | 15%   | CVE feeds, threat intel, detection rules, local data |
 | Reasoning / Math | 10%   | `finemath`, `nemotron_cc_math`                       |
-| Indonesian       | 10%   | `wikipedia_id`, `fineweb2_id`                        |
 
-> Indonesian is its own bucket even though those sources carry `category: "general"`,
-> so the Indonesian slice does not eat the English general budget.
 > Total `max_tokens` available across all sources is still ~103B — the shares decide
 > how the run's budget is divided, `max_tokens` only caps how much a source can give.
+
+#### `--stage cpt` (`CPT_TARGET_SHARE`) — continued pretraining
+
+CPT deliberately has no single `cybersecurity`/`code` bucket: the leaves below ARE
+the buckets, so the existing deficit picker (`_pick_bucket`) enforces the sub-shares
+directly, no extra layer needed. Cyber leaves sum to 50%, code leaves to 30%.
+
+| Cyber leaf                | Share | Code leaf      | Share |
+| :--------------------------- | :------ | :---------------- | :------ |
+| `cyber_vuln_analysis`      | 10%   | `code_python`    | 8%    |
+| `cyber_fundamentals`       | 8%    | `code_c_cpp`     | 6%    |
+| `cyber_network`            | 7%    | `code_shell`     | 5%    |
+| `cyber_web`                | 7%    | `code_systems`   | 5%    |
+| `cyber_os_linux`           | 5%    | `code_js_ts`     | 4%    |
+| `cyber_malware_re`         | 5%    | `code_other`     | 2%    |
+| `cyber_reports_cve`        | 3%    |                  |       |
+| `cyber_cloud_container`    | 3%    |                  |       |
+| `cyber_crypto`             | 2%    |                  |       |
+
+Plus `general` 10% and `instruction` 10% (unchanged sources, indonesian still folded
+into `general`).
+
+Code leaves are assigned per **source** (`CPT_CODE_LEAF_BY_SOURCE` in code). Cyber
+leaves cannot be — the big cyber corpora (e.g. `primus_nemotron_cc`, 7.6B tokens) span
+every subdomain, so a source-level tag would be fiction. Instead every cybersecurity
+source routes to one pool bucket for source *selection*, and each **document** drawn
+from it is scored against all 9 leaves' keyword sets by `classify_cyber_subdomain()`
+(highest scorer wins, ties broken by a fixed priority order, first ~4000 chars only —
+documents are large, this has to stay cheap) and rejection-sampled against its leaf's
+target share: a document whose leaf is already at/above target is skipped and another
+one drawn, unless 50 consecutive documents have been skipped in a row (`MAX_CONSECUTIVE_SKIPS`),
+in which case it's accepted anyway so a subdomain with genuinely little supply in the
+corpus (e.g. `cyber_crypto`) can never stall the run. The end-of-run summary prints
+realized vs. target tokens per leaf so a starved subdomain is visible, not silent.
+`--dry-run` cannot predict per-document classification, so it only reports the
+cybersecurity pool total and says so explicitly.
 
 > ⚠️ **`base_data_climbmix` stays deliberately tiny (2 shards).** `mesosfer/data/dataset.py`
 > treats that directory as the *primary* corpus and merges it **additively** with the
@@ -132,8 +174,8 @@ the realized mix stays on target even though document lengths differ per domain.
 | `fineweb_edu`               | General       | 0.7    | 4.0B       | `HuggingFaceFW/fineweb-edu` (`sample-10BT`) | Educational web content.                 |
 | `climbmix`                  | General       | 0.6    | 5.0B       | `karpathy/climbmix-400b-shuffle`            | General pretraining, suppressed.         |
 | `wikipedia`                 | General       | 0.5    | 3.0B       | `wikimedia/wikipedia` (`20231101.en`)       | English Wikipedia, suppressed.           |
-| `fineweb2_id`               | Indonesian    | 0.6    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
-| `wikipedia_id`              | Indonesian    | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
+| `fineweb2_id`               | General       | 0.6    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
+| `wikipedia_id`              | General       | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
 
 > **48 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
 
@@ -143,12 +185,13 @@ the realized mix stays on target even though document lengths differ per domain.
 > supply nothing. `--dry-run` reports what these can really give — read it, not this table,
 > when checking whether the cybersecurity bucket can fill its share.
 
-> 🇮🇩 **Indonesian in pretraining:** `fineweb2_id` + `wikipedia_id` form their own 10% bucket, so the
-> tokenizer learns real Indonesian sub-words and the base model has a language foundation to build on.
-> The Indonesian SFT sets (Section 3) sit on top of it; SFT alone cannot teach a language the base model
-> never saw during pretraining. The two weights (0.5 / 0.6) only split the bucket between them — the
-> bucket size comes from `TARGET_DOMAIN_SHARE`. Their `max_tokens` (~3.2B combined) is the ceiling, so
-> budgets above ~32B tokens will run this bucket dry and the rest absorbs its share.
+> 🇮🇩 **Indonesian in pretraining:** `fineweb2_id` + `wikipedia_id` fold into the `general` bucket in
+> both stage profiles (no separate Indonesian bucket), so the tokenizer still learns real Indonesian
+> sub-words and the base model has a language foundation to build on, without eating a dedicated share
+> of the budget. The Indonesian SFT sets (Section 3) sit on top of it; SFT alone cannot teach a language
+> the base model never saw during pretraining. The two weights (0.5 / 0.6) only split their slice of
+> `general` between them. Their `max_tokens` (~3.2B combined) is the ceiling, so a large enough budget
+> will run them dry and the rest of `general` absorbs their share.
 
 > ⚠️ **Loss-spike prevention:** Raw logs (`.log`, `.xml`, `.json`) are converted to natural-language
 > narratives by `convert_logs_to_nl.py` before pretraining:

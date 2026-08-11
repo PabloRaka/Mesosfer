@@ -108,18 +108,120 @@ def test_sampling_probabilities_prefer_cyber_and_local_over_general():
     assert general_probs["climbmix"] > general_probs["wikipedia"]
 
 
-def test_indonesian_sources_are_their_own_share_bucket():
-    assert prepare_data._source_bucket("wikipedia_id") == "indonesian"
+def test_indonesian_sources_land_in_general():
+    # No more dedicated "indonesian" bucket — wikipedia_id/fineweb2_id fold into
+    # "general" in both stage profiles, their share governed by intra-bucket weights.
+    assert prepare_data._source_bucket("wikipedia_id") == "general"
+    assert prepare_data._source_bucket("fineweb2_id") == "general"
+    assert prepare_data._source_bucket("wikipedia_id", stage="cpt") == "general"
     assert prepare_data._source_bucket("climbmix") == "general"
+
+
+def test_stage_profiles_sum_to_one():
+    assert sum(prepare_data.PRETRAIN_TARGET_SHARE.values()) == pytest.approx(1.0)
+    assert sum(prepare_data.CPT_TARGET_SHARE.values()) == pytest.approx(1.0)
     assert sum(prepare_data.TARGET_DOMAIN_SHARE.values()) == pytest.approx(1.0)
 
 
+def test_cpt_cyber_and_code_leaf_shares_sum_correctly():
+    cyber_total = sum(v for k, v in prepare_data.CPT_TARGET_SHARE.items() if k.startswith("cyber_"))
+    code_total = sum(v for k, v in prepare_data.CPT_TARGET_SHARE.items() if k.startswith("code_"))
+    assert cyber_total == pytest.approx(0.50)
+    assert code_total == pytest.approx(0.30)
+
+
+def test_cpt_bucket_routing():
+    # Code sources fan out to leaf buckets by name; cyber sources all share one pool
+    # bucket for source *selection* (the leaf is decided per document — see below).
+    assert prepare_data._source_bucket("secure_code_python", stage="cpt") == "code_python"
+    assert prepare_data._source_bucket("secure_code_c", stage="cpt") == "code_c_cpp"
+    assert prepare_data._source_bucket("secure_code_cpp", stage="cpt") == "code_c_cpp"
+    assert prepare_data._source_bucket("code_powershell", stage="cpt") == "code_shell"
+    assert prepare_data._source_bucket("secure_code_rust", stage="cpt") == "code_systems"
+    assert prepare_data._source_bucket("metasploit", stage="cpt") == "code_other"
+    assert prepare_data._source_bucket("nvd_cve", stage="cpt") == "cybersecurity"
+    assert prepare_data._source_bucket("primus_nemotron_cc", stage="cpt") == "cybersecurity"
+    assert prepare_data._source_bucket("finemath", stage="cpt") == "instruction"
+
+
+def test_classify_cyber_subdomain_routes_obvious_documents():
+    cases = {
+        "cyber_vuln_analysis": "This CWE-787 out-of-bounds write leads to a heap overflow discovered "
+                                "via fuzzing with a custom AFL++ harness and confirmed with ASAN.",
+        "cyber_reports_cve": "CVE-2024-3400 is tracked in the CISA Known Exploited Vulnerabilities "
+                              "catalog; vendor security bulletin lists CVSS 10.0.",
+        "cyber_web": "The application is vulnerable to reflected XSS and SQL injection via the "
+                     "search parameter, an OWASP Top 10 issue in the HTTP request handler.",
+        "cyber_network": "Suricata and Zeek IDS sensors flagged a port scan over TCP before lateral "
+                          "movement was observed in the packet capture from Wireshark.",
+        "cyber_os_linux": "The exploit abuses sudo misconfiguration for privilege escalation, then "
+                           "edits the Windows registry and disables Sysmon logging via SELinux bypass.",
+        "cyber_malware_re": "Analysts used Ghidra and IDA Pro to disassemble the packed shellcode, "
+                             "extracting the C2 server address embedded in the PE header.",
+        "cyber_cloud_container": "A misconfigured Kubernetes IAM policy allowed container escape and "
+                                  "access to an exposed S3 bucket, visible in the CloudTrail audit log.",
+        "cyber_crypto": "The TLS handshake negotiates an AES-256 cipher; the certificate authority "
+                         "validates the RSA key via a PKI chain with HMAC-SHA-256 integrity checks.",
+    }
+    for expected_leaf, text in cases.items():
+        assert prepare_data.classify_cyber_subdomain(text) == expected_leaf
+
+    # No keyword hits at all -> fundamentals fallback.
+    assert prepare_data.classify_cyber_subdomain(
+        "A general overview of security awareness training for new employees."
+    ) == "cyber_fundamentals"
+
+
+def test_cyber_leaf_skip_cap_releases_after_50_consecutive_skips():
+    leaf_stats = {"cyber_web": {"docs": 100, "chars": 1_000_000}}
+    global_chars = 1_000_000  # cyber_web already at 100% of everything written — always over target
+
+    # Below the cap: an over-target leaf keeps getting skipped.
+    assert prepare_data._cyber_leaf_should_skip("cyber_web", leaf_stats, global_chars, 49) is True
+    # At the cap: forced acceptance so a starved/over-supplied leaf can't stall the run.
+    assert prepare_data._cyber_leaf_should_skip("cyber_web", leaf_stats, global_chars, 50) is False
+
+
+def test_cpt_bucket_picker_drives_the_mix_to_the_leaf_targets(monkeypatch):
+    """Same greedy-deficit pattern as the pretrain test above, but exercising the
+    cpt profile's leaf buckets (code leaves + general + instruction; the cyber pool
+    is exercised separately since its leaf is decided per document, not per source)."""
+    monkeypatch.setattr(prepare_data, "TARGET_DOMAIN_SHARE", prepare_data.CPT_TARGET_SHARE)
+    names = ["secure_code_python", "secure_code_c", "code_powershell", "climbmix", "finemath"]
+    samplers = prepare_data._build_bucket_samplers(names, stage="cpt")
+    doc_chars = {"secure_code_python": 500, "secure_code_c": 500, "code_powershell": 200,
+                 "climbmix": 4000, "finemath": 2000}
+    stats = {n: {"docs": 0, "chars": 0} for n in names}
+
+    for _ in range(4000):
+        bucket = prepare_data._pick_bucket(samplers, stats, stage="cpt")
+        picked = samplers[bucket][0][0]
+        stats[picked]["docs"] += 1
+        stats[picked]["chars"] += doc_chars[picked]
+
+    total = sum(s["chars"] for s in stats.values())
+    # Only 5 of the cpt profile's 17 buckets are exercised here, so _pick_bucket
+    # renormalizes target shares over just those 5 (see _pick_bucket's target_total) —
+    # mirror that when computing the expected share, instead of comparing to the raw
+    # (whole-profile) CPT_TARGET_SHARE value.
+    target_total = sum(prepare_data._bucket_target_share(b) for b in samplers)
+    for name in names:
+        bucket = prepare_data._source_bucket(name, stage="cpt")
+        target = prepare_data._bucket_target_share(bucket) / target_total
+        assert stats[name]["chars"] / total == pytest.approx(target, abs=0.02)
+
+
 def test_bucket_picker_drives_the_mix_to_the_target_shares():
-    """Greedy deficit picking must land on TARGET_DOMAIN_SHARE despite uneven doc sizes."""
-    names = ["climbmix", "wikipedia_id", "secure_code_python", "nvd_cve", "finemath"]
+    """Greedy deficit picking must land on TARGET_DOMAIN_SHARE despite uneven doc sizes.
+
+    One source per pretrain bucket (general/code/cybersecurity/instruction — no more
+    "indonesian" bucket, wikipedia_id now shares "general" with climbmix, so it's left
+    out here to keep this a clean one-source-per-bucket check).
+    """
+    names = ["climbmix", "secure_code_python", "nvd_cve", "finemath"]
     samplers = prepare_data._build_bucket_samplers(names)
     # Wildly different document lengths per bucket — the whole point of char-based deficits.
-    doc_chars = {"climbmix": 4000, "wikipedia_id": 8000, "secure_code_python": 500,
+    doc_chars = {"climbmix": 4000, "secure_code_python": 500,
                  "nvd_cve": 300, "finemath": 2000}
     stats = {n: {"docs": 0, "chars": 0} for n in names}
 

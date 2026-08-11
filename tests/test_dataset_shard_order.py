@@ -77,6 +77,66 @@ def test_no_val_prefixed_file_falls_back_to_legacy_last_file():
     assert dataset.split_parquet_paths(paths, "train") == expected_train
 
 
+def test_list_parquet_files_data_dir_does_not_merge_auxiliary(tmp_path, monkeypatch):
+    """--data-dir (CPT) must read only the given directory - auxiliary corpora that are
+    normally auto-merged into pretraining must NOT leak into a CPT run.
+    """
+    primary = tmp_path / "primary"
+    aux = tmp_path / "aux"
+    primary.mkdir()
+    aux.mkdir()
+    _write_shards(primary, 3)
+    _write_shards(aux, 2)
+    monkeypatch.setattr(dataset, "AUXILIARY_DATA_DIRS", [str(aux)])
+
+    result = dataset.list_parquet_files(data_dir=str(primary))
+
+    assert result == sorted(str(p) for p in primary.glob("*.parquet"))
+    assert all("aux" not in p for p in result)
+
+
+def test_dataloader_threads_data_dir_through(tmp_path, monkeypatch):
+    """base_train's --data-dir must reach list_parquet_files unchanged."""
+    from mesosfer.data import dataloader
+
+    _write_shards(tmp_path, 2)
+    paths = sorted(str(p) for p in tmp_path.glob("*.parquet"))
+    captured = {}
+
+    def fake_list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=True):
+        captured["data_dir"] = data_dir
+        return paths
+
+    monkeypatch.setattr(dataloader, "list_parquet_files", fake_list_parquet_files)
+
+    gen = dataloader._document_batches("train", None, 128, data_dir=str(tmp_path))
+    next(gen)
+
+    assert captured["data_dir"] == str(tmp_path)
+
+
+def test_dataloader_data_dir_none_is_default(tmp_path, monkeypatch):
+    """data_dir=None (the default) must produce the exact same list_parquet_files call as
+    before this flag existed - i.e. merge-everything behavior is untouched.
+    """
+    from mesosfer.data import dataloader
+
+    _write_shards(tmp_path, 2)
+    paths = sorted(str(p) for p in tmp_path.glob("*.parquet"))
+    captured = {}
+
+    def fake_list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=True):
+        captured["data_dir"] = data_dir
+        return paths
+
+    monkeypatch.setattr(dataloader, "list_parquet_files", fake_list_parquet_files)
+
+    gen = dataloader._document_batches("train", None, 128) # data_dir omitted
+    next(gen)
+
+    assert captured["data_dir"] is None
+
+
 def test_pretrain_dataloader_uses_the_same_order():
     """base_train reads through dataloader._document_batches, not parquets_iter_batched.
 
