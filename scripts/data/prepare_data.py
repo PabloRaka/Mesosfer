@@ -12,6 +12,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import glob
@@ -468,7 +469,7 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "climbmix":                0.6,  # very large, keep proportion down
     "wikipedia":               0.5,  # huge corpus, don't let it dominate
     "fineweb_edu":             0.7,
-    # Indonesian — its own share bucket (see TARGET_DOMAIN_SHARE), weights only split it.
+    # Indonesian — folded into the "general" bucket, weights only split it.
     "wikipedia_id":            0.5,
     "fineweb2_id":             0.6,
     # Code — important for secure coding
@@ -501,26 +502,213 @@ DOMAIN_SAMPLING_WEIGHTS = {
 # inside a bucket. Shares are measured in characters written (≈ tokens) and are
 # renormalized over whichever buckets are actually present in a run, so a
 # --sources subset still gets a sane mix.
+#
+# Two stage profiles, selected with --stage:
+#   pretrain — coarse buckets, the original mix.
+#   cpt      — continued pretraining. Cyber and code are broken into leaf
+#              sub-domains and there is no single "cybersecurity"/"code" bucket:
+#              the leaves ARE the buckets, so the deficit picker enforces the
+#              sub-shares with no extra layer. wikipedia_id/fineweb2_id (ex-
+#              "indonesian") fold into "general" in both profiles — their share
+#              is governed by their intra-bucket DOMAIN_SAMPLING_WEIGHTS only.
 # =============================================================================
 
-TARGET_DOMAIN_SHARE = {
-    "general":       0.40,  # English general knowledge
-    "code":          0.30,
-    "cybersecurity": 0.10,
-    "instruction":   0.10,  # math / reasoning
-    "indonesian":    0.10,
+PRETRAIN_TARGET_SHARE = {
+    "general":       0.50,
+    "code":          0.25,
+    "cybersecurity": 0.15,
+    "instruction":   0.10,
 }
 
-# Indonesian sources are category "general" in DATASET_SOURCES; they get their own
-# share bucket so the Indonesian slice does not eat the English general budget.
-INDONESIAN_SOURCES = ("wikipedia_id", "fineweb2_id")
+CPT_TARGET_SHARE = {
+    "cyber_vuln_analysis":    0.10,
+    "cyber_fundamentals":     0.08,
+    "cyber_network":          0.07,
+    "cyber_web":              0.07,
+    "cyber_os_linux":         0.05,
+    "cyber_malware_re":       0.05,
+    "cyber_reports_cve":      0.03,
+    "cyber_cloud_container":  0.03,
+    "cyber_crypto":           0.02,
+    "code_python":            0.08,
+    "code_c_cpp":             0.06,
+    "code_shell":             0.05,
+    "code_systems":           0.05,
+    "code_js_ts":             0.04,
+    "code_other":             0.02,
+    "general":                0.10,
+    "instruction":            0.10,
+}
+
+STAGE_TARGET_SHARES = {"pretrain": PRETRAIN_TARGET_SHARE, "cpt": CPT_TARGET_SHARE}
+
+for _stage_name, _shares in STAGE_TARGET_SHARES.items():
+    assert abs(sum(_shares.values()) - 1.0) < 1e-9, f"--stage {_stage_name} shares must sum to 1.0"
+del _stage_name, _shares
+
+# Mutated by main() to the selected --stage's profile; every function below reads
+# this module-level name rather than taking a stage argument, so switching stages
+# is a single assignment. Defaults to pretrain for library/test use.
+TARGET_DOMAIN_SHARE = PRETRAIN_TARGET_SHARE
+
+# cpt-stage only: which code leaf a source's docs fall into (pretrain keeps the
+# flat "code" bucket, no mapping needed).
+CPT_CODE_LEAF_BY_SOURCE = {
+    "secure_code_python": "code_python", "swallow_code_v2": "code_python", "code_jupyter": "code_python",
+    "secure_code_c": "code_c_cpp", "secure_code_cpp": "code_c_cpp",
+    "secure_code_javascript": "code_js_ts", "secure_code_typescript": "code_js_ts",
+    "secure_code_shell": "code_shell", "code_powershell": "code_shell",
+    "secure_code_rust": "code_systems", "secure_code_go": "code_systems",
+    "code_assembly": "code_systems", "code_csharp": "code_systems",
+    "secure_code_java": "code_other", "secure_code_php": "code_other",
+    "code_sql": "code_other", "metasploit": "code_other", "exploitdb": "code_other",
+}
+
+# cpt-stage only: cybersecurity sources are NOT assigned a single leaf — the big
+# corpora (e.g. primus_nemotron_cc) span every subdomain, so a source-level tag
+# would be fiction. They all route to this one pool bucket for source selection;
+# the actual leaf is decided per document by classify_cyber_subdomain() as each
+# doc is drawn (see interleaved_shuffle_main).
+CPT_CYBER_POOL_BUCKET = "cybersecurity"
 
 
-def _source_bucket(name):
+def _bucket_target_share(bucket):
+    """Target share for a bucket name, against the current TARGET_DOMAIN_SHARE.
+
+    In cpt stage, "cybersecurity" isn't a key of TARGET_DOMAIN_SHARE (the leaves
+    are) — its target is the sum of the cyber_* leaf shares, i.e. the pool as a
+    whole. Used by _pick_bucket to decide whether the cyber pool is in deficit.
+    """
+    if bucket in TARGET_DOMAIN_SHARE:
+        return TARGET_DOMAIN_SHARE[bucket]
+    if bucket == CPT_CYBER_POOL_BUCKET:
+        return sum(v for k, v in TARGET_DOMAIN_SHARE.items() if k.startswith("cyber_"))
+    return 0.0
+
+
+def _source_bucket(name, stage="pretrain"):
     source = DATASET_SOURCES.get(name)
     if source is None:
         return None  # stale name from an old progress.json
-    return "indonesian" if name in INDONESIAN_SOURCES else source["category"]
+    category = source["category"]
+    if stage != "cpt":
+        return category
+    if category == "code":
+        return CPT_CODE_LEAF_BY_SOURCE.get(name, "code_other")
+    if category == "cybersecurity":
+        return CPT_CYBER_POOL_BUCKET
+    return category  # general / instruction unchanged
+
+
+# =============================================================================
+# cpt stage: per-document cyber subdomain classification.
+#
+# Cyber leaves can't be assigned per-source (see CPT_CYBER_POOL_BUCKET), so each
+# document drawn from a cyber source is scored against every leaf's keyword set
+# and assigned to the highest scorer, over the first CLASSIFY_SAMPLE_CHARS chars
+# only (documents are large; this must stay cheap). Ties broken by
+# CYBER_SUBDOMAIN_PRIORITY order; no match at all falls back to cyber_fundamentals.
+# =============================================================================
+
+CLASSIFY_SAMPLE_CHARS = 4000
+
+# Most-specific-first; also the tie-break order in classify_cyber_subdomain().
+# cyber_fundamentals is the fallback, never scored directly (it's "matches nothing").
+CYBER_SUBDOMAIN_PRIORITY = (
+    "cyber_vuln_analysis",
+    "cyber_reports_cve",
+    "cyber_web",
+    "cyber_network",
+    "cyber_os_linux",
+    "cyber_malware_re",
+    "cyber_cloud_container",
+    "cyber_crypto",
+)
+
+CYBER_SUBDOMAIN_KEYWORDS = {
+    # Memory-safety bug classes, CWE, fuzzing, patch analysis, exploit primitives.
+    "cyber_vuln_analysis": MECHANISM_TERMS + (
+        "cwe-", "type confusion", "out-of-bounds", "null pointer dereference",
+        "fuzzing", "fuzzer", "afl++", "libfuzzer", "sanitizer", "asan",
+        "patch analysis", "root cause analysis", "exploit primitive", "gadget chain",
+    ),
+    # CVE identifiers, advisories, KEV, vendor bulletins.
+    "cyber_reports_cve": (
+        "cve-", "advisory", "advisories", "known exploited vulnerabilities",
+        "kev catalog", "security bulletin", "vendor bulletin", "cvss", "nvd",
+        "patch tuesday", "security advisory",
+    ),
+    # XSS/SQLi/CSRF/SSRF, HTTP, OWASP.
+    "cyber_web": (
+        "xss", "cross-site scripting", "sqli", "sql injection", "csrf", "ssrf",
+        "owasp", "http request", "http response", "web application firewall",
+        "cross-site request forgery", "html injection", "session hijacking",
+    ),
+    # TCP/DNS/firewall/IDS/pcap/scanning/lateral movement.
+    "cyber_network": SECURITY_STACK_TERMS + (
+        "tcp", "udp", "dns", "pcap", "wireshark", "port scan", "nmap",
+        "lateral movement", "network traffic", "packet capture", "firewall rule",
+    ),
+    # syscalls, SELinux, sudo, registry, Sysmon, privilege escalation.
+    "cyber_os_linux": (
+        "syscall", "selinux", "sudo", "windows registry", "sysmon",
+        "privilege escalation", "setuid", "apparmor", "systemd",
+        "/etc/passwd", "event id", "active directory",
+    ),
+    # disassembly, packing, YARA, shellcode, PE/ELF internals, C2.
+    "cyber_malware_re": (
+        "disassembly", "disassembler", "ghidra", "ida pro", "radare2",
+        "packer", "packing", "unpacking", "yara rule", "shellcode",
+        "pe header", "elf header", "c2 server", "command and control", "rootkit",
+    ),
+    # Kubernetes, Docker, IAM, S3, cloud audit logs.
+    "cyber_cloud_container": (
+        "kubernetes", "docker", "iam policy", "s3 bucket", "cloudtrail",
+        "azure ad", "container escape", "helm chart", "terraform",
+        "cloud audit log", "eks cluster", "gke cluster",
+    ),
+    # ciphers, TLS/PKI, key exchange, hashing, entropy.
+    "cyber_crypto": (
+        "cipher", "tls handshake", "pki", "key exchange", "hashing algorithm",
+        "entropy", "aes-256", "rsa key", "elliptic curve", "certificate authority",
+        "hmac", "sha-256",
+    ),
+}
+
+_CYBER_SUBDOMAIN_PATTERNS = {
+    leaf: re.compile("|".join(re.escape(k) for k in keywords), re.IGNORECASE)
+    for leaf, keywords in CYBER_SUBDOMAIN_KEYWORDS.items()
+}
+
+
+def classify_cyber_subdomain(text):
+    """Score `text` against every cyber leaf's keyword set, return the best match."""
+    sample = text[:CLASSIFY_SAMPLE_CHARS]
+    best_leaf, best_score = "cyber_fundamentals", 0
+    for leaf in CYBER_SUBDOMAIN_PRIORITY:
+        score = len(_CYBER_SUBDOMAIN_PATTERNS[leaf].findall(sample))
+        if score > best_score:
+            best_score, best_leaf = score, leaf
+    return best_leaf
+
+
+MAX_CONSECUTIVE_SKIPS = 50
+
+
+def _cyber_leaf_should_skip(leaf, leaf_stats, global_chars, consecutive_skips):
+    """Rejection-sample a classified cyber document against its leaf's target share.
+
+    Skips a document whose leaf is already at/above target, so over-supplied
+    leaves (e.g. fundamentals prose) stop crowding out starved ones. Forced to
+    accept once MAX_CONSECUTIVE_SKIPS have been skipped in a row, so a leaf with
+    no real supply in the corpus can never stall the run.
+    """
+    if consecutive_skips >= MAX_CONSECUTIVE_SKIPS:
+        return False
+    if not global_chars:
+        return False
+    realized_share = leaf_stats.get(leaf, {}).get("chars", 0) / global_chars
+    return realized_share >= CPT_TARGET_SHARE.get(leaf, 0.0)
 
 # =============================================================================
 # Dataset source definitions
@@ -940,9 +1128,14 @@ def _category_emoji(category):
         "code": "💻",
         "general": "📚",
         "instruction": "🧠",
-        "indonesian": "🇮🇩",
     }
-    return emoji_map.get(category, "📋")
+    if category in emoji_map:
+        return emoji_map[category]
+    if category.startswith("cyber_"):
+        return "🔒"
+    if category.startswith("code_"):
+        return "💻"
+    return "📋"
 
 # =============================================================================
 # Formatting helpers
@@ -2310,22 +2503,30 @@ def _effective_source_cap_tokens(source_config):
     return source_config.get("max_tokens")
 
 def print_dry_run_summary(args, source_names, output_dir):
+    stage = getattr(args, "stage", "pretrain")
     print()
     print("=" * 70)
     print("  mesosfer DATA PREPARATION — DRY RUN")
     print("=" * 70)
     print("  [DRY RUN] No data will be downloaded or written.")
     print(f"  Output: {output_dir}")
+    print(f"  Stage: {stage}")
     print(f"  Shuffle mode: {args.shuffle_mode}")
     if args.max_tokens is not None:
         print(f"  Global max tokens: ~{args.max_tokens:,}")
     print(f"  Sources: {len(source_names)}")
     print()
+    if stage == "cpt":
+        print("  Note: cyber sub-domains (cyber_vuln_analysis, cyber_web, ...) are decided")
+        print("  per document at runtime by classify_cyber_subdomain() — a dry run cannot")
+        print("  predict them. Cybersecurity below is the pool total; see the run summary")
+        print("  after an actual run for the realized per-leaf breakdown.")
+        print()
 
     bucket_caps = defaultdict(int)
     for name in source_names:
         src = DATASET_SOURCES[name]
-        cat = _source_bucket(name)
+        cat = _source_bucket(name, stage)
         emoji = _category_emoji(cat)
         weight = DOMAIN_SAMPLING_WEIGHTS.get(name, 1.0)
         cap = _effective_source_cap_tokens(src)
@@ -2346,11 +2547,11 @@ def print_dry_run_summary(args, source_names, output_dir):
         print(f"  {emoji} {name:28s} | w={weight:.1f} | {cap_label:22s}{local_label} | {src['description']}")
 
     if bucket_caps:
-        target_total = sum(TARGET_DOMAIN_SHARE.get(b, 0.0) for b in bucket_caps) or 1.0
+        target_total = sum(_bucket_target_share(b) for b in bucket_caps) or 1.0
         print()
         print("  Planned mix (target share of --max-tokens vs what the sources can supply):")
         for bucket, cap in sorted(bucket_caps.items()):
-            share = TARGET_DOMAIN_SHARE.get(bucket, 0.0) / target_total
+            share = _bucket_target_share(bucket) / target_total
             emoji = _category_emoji(bucket)
             want = f"~{int(args.max_tokens * share):,} tokens" if args.max_tokens else "budget-limited"
             short = "  ⚠️  under-supplied" if args.max_tokens and cap < args.max_tokens * share else ""
@@ -2377,15 +2578,15 @@ def _build_sampling_probs(source_names, temperature=1.0):
     return [w / total for w in raw]
 
 
-def _build_bucket_samplers(source_names, temperature=1.0):
+def _build_bucket_samplers(source_names, temperature=1.0, stage="pretrain"):
     """Group sources by share bucket, each with its own intra-bucket probabilities."""
     grouped = defaultdict(list)
     for name in source_names:
-        grouped[_source_bucket(name)].append(name)
+        grouped[_source_bucket(name, stage)].append(name)
     return {b: (names, _build_sampling_probs(names, temperature)) for b, names in grouped.items()}
 
 
-def _pick_bucket(samplers, stats):
+def _pick_bucket(samplers, stats, stage="pretrain"):
     """Pick the bucket furthest below its target share of everything written so far.
 
     Greedy deficit selection instead of one flat weighted draw: it keeps the realized
@@ -2394,10 +2595,10 @@ def _pick_bucket(samplers, stats):
     """
     written_by_bucket = defaultdict(int)
     for name, s in stats.items():
-        written_by_bucket[_source_bucket(name)] += s["chars"]
+        written_by_bucket[_source_bucket(name, stage)] += s["chars"]
     written = sum(written_by_bucket.values()) or 1
-    target_total = sum(TARGET_DOMAIN_SHARE.get(b, 0.0) for b in samplers) or 1.0
-    return max(samplers, key=lambda b: TARGET_DOMAIN_SHARE.get(b, 0.0) / target_total
+    target_total = sum(_bucket_target_share(b) for b in samplers) or 1.0
+    return max(samplers, key=lambda b: _bucket_target_share(b) / target_total
                - written_by_bucket[b] / written)
 
 
@@ -2420,6 +2621,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     import random
     rng = random.Random(42)
 
+    stage = getattr(args, "stage", "pretrain")
     t0 = time.time()
 
     # Resume. Without this the function always started at shard_00000, so running it a
@@ -2442,6 +2644,9 @@ def interleaved_shuffle_main(args, source_names, output_dir):
         stats = defaultdict(lambda: {"docs": 0, "chars": 0})
         for name, counts in prev.get("stats", {}).items():
             stats[name] = counts
+        leaf_stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+        for leaf, counts in prev.get("leaf_stats", {}).items():
+            leaf_stats[leaf] = counts
         checkpoint_number = prev.get("checkpoint_number", 0)
         bytes_at_last_checkpoint = prev.get("bytes_at_last_checkpoint", 0)
         logger.info(f"Resuming interleaved run at shard_idx={shard_idx} "
@@ -2456,6 +2661,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
         shard_idx = 0
         val_part_idx = 0
         stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+        leaf_stats = defaultdict(lambda: {"docs": 0, "chars": 0})
         checkpoint_number = 0
         bytes_at_last_checkpoint = 0
 
@@ -2484,17 +2690,18 @@ def interleaved_shuffle_main(args, source_names, output_dir):
 
     # Active sources (those not yet exhausted)
     active_sources = list(source_names)
-    samplers = _build_bucket_samplers(active_sources, temperature)
+    samplers = _build_bucket_samplers(active_sources, temperature, stage)
+    consecutive_cyber_skips = 0
 
     current_shard = []
     exhausted_count = 0
 
     print()
     print("  🔀 INTERLEAVED SHUFFLE MODE")
-    print(f"  Cluster size: {cluster_size} | Temperature: {temperature}")
+    print(f"  Stage: {stage} | Cluster size: {cluster_size} | Temperature: {temperature}")
     print(f"  Active sources: {len(active_sources)}")
     print("  Target mix: " + " | ".join(
-        f"{b} {100 * TARGET_DOMAIN_SHARE.get(b, 0.0):.0f}%" for b in sorted(samplers)))
+        f"{b} {100 * _bucket_target_share(b):.0f}%" for b in sorted(samplers)))
     print()
 
     while active_sources:
@@ -2503,7 +2710,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
             break
 
         # Pick the bucket that is behind on its target share, then a source inside it
-        bucket = _pick_bucket(samplers, stats)
+        bucket = _pick_bucket(samplers, stats, stage)
         bucket_names, bucket_probs = samplers[bucket]
         chosen_name = rng.choices(bucket_names, weights=bucket_probs, k=1)[0]
         it = source_iters[chosen_name]
@@ -2519,9 +2726,21 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                 active_sources.remove(chosen_name)
                 del source_iters[chosen_name]
                 if active_sources:
-                    samplers = _build_bucket_samplers(active_sources, temperature)
+                    samplers = _build_bucket_samplers(active_sources, temperature, stage)
                 exhausted_count += 1
                 break
+
+            # cpt stage: the cyber pool bucket has no per-source leaf (see
+            # CPT_CYBER_POOL_BUCKET) — classify this document and rejection-sample it
+            # against its leaf's target share, so over-supplied leaves don't crowd out
+            # starved ones. MAX_CONSECUTIVE_SKIPS forces acceptance either way.
+            cyber_leaf = None
+            if stage == "cpt" and bucket == CPT_CYBER_POOL_BUCKET:
+                cyber_leaf = classify_cyber_subdomain(text)
+                if _cyber_leaf_should_skip(cyber_leaf, leaf_stats, global_chars, consecutive_cyber_skips):
+                    consecutive_cyber_skips += 1
+                    continue
+                consecutive_cyber_skips = 0
 
             if global_max_chars is not None and global_chars + len(text) > global_max_chars:
                 global_chars = global_max_chars
@@ -2532,6 +2751,9 @@ def interleaved_shuffle_main(args, source_names, output_dir):
             stats[chosen_name]["chars"] += len(text)
             global_chars += len(text)
             docs_drawn += 1
+            if cyber_leaf is not None:
+                leaf_stats[cyber_leaf]["docs"] += 1
+                leaf_stats[cyber_leaf]["chars"] += len(text)
 
             # Flush shard when full
             if len(current_shard) >= args.shard_size:
@@ -2607,11 +2829,17 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     print(f"  Time elapsed: {elapsed/60:.1f} minutes")
     print()
 
-    # Realized mix vs TARGET_DOMAIN_SHARE
+    # Realized mix vs TARGET_DOMAIN_SHARE. cyber_* leaves aren't tracked per-source (see
+    # CPT_CYBER_POOL_BUCKET) — they come from leaf_stats, populated by classify_cyber_subdomain
+    # as each cyber document was drawn, so a starved subdomain (e.g. crypto, if the corpus
+    # simply has little of it) is visible here instead of silently absorbed into the pool.
     if total_tokens > 0:
         for bucket, target in TARGET_DOMAIN_SHARE.items():
-            tokens = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
-                         for n in summary_sources if _source_bucket(n) == bucket)
+            if bucket.startswith("cyber_"):
+                tokens = int(leaf_stats.get(bucket, {}).get("chars", 0) / CHARS_PER_TOKEN)
+            else:
+                tokens = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
+                             for n in summary_sources if _source_bucket(n, stage) == bucket)
             if tokens <= 0:
                 continue
             emoji = _category_emoji(bucket)
@@ -2637,8 +2865,10 @@ def interleaved_shuffle_main(args, source_names, output_dir):
         "completed_sources": sorted(already_done | set(source_names)),
         "next_shard_idx": shard_idx,
         "stats": dict(stats),
+        "leaf_stats": dict(leaf_stats),
         "finished": True,
         "shuffle_mode": "interleaved",
+        "stage": stage,
         "bytes_at_last_checkpoint": get_total_parquet_bytes(output_dir),
         "checkpoint_number": checkpoint_number + 1,
         "next_val_part_idx": val_part_idx,
@@ -2765,8 +2995,14 @@ DEPTH_SHORTCUTS = (12, 16, 20, 24, 32)
 
 def main():
     parser = argparse.ArgumentParser(description="Download and prepare the mesosfer cybersecurity pretraining dataset")
-    parser.add_argument("--output-dir", type=str, default="base_data_cybersecurity",
-                        help="Output directory name under mesosfer_BASE_DIR")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory name under mesosfer_BASE_DIR "
+                             "(default: base_data_cybersecurity for --stage pretrain, "
+                             "base_data_cpt for --stage cpt)")
+    parser.add_argument("--stage", type=str, default="pretrain", choices=["pretrain", "cpt"],
+                        help="Corpus mix profile: 'pretrain' (general/code/cybersecurity/instruction "
+                             "buckets) or 'cpt' (continued pretraining — cyber and code broken into "
+                             "leaf sub-domains, see CPT_TARGET_SHARE)")
     parser.add_argument("--max-tokens", type=int, default=None,
                         help="Global maximum tokens across ALL sources")
     parser.add_argument("--shard-size", type=int, default=100_000,
@@ -2815,6 +3051,14 @@ def main():
     parser.add_argument("--sample-10k", action="store_true",
                       help="Prepare a tiny 10,000-token sample of datasets for fast testing")
     args = parser.parse_args()
+
+    if args.output_dir is None:
+        args.output_dir = "base_data_cpt" if args.stage == "cpt" else "base_data_cybersecurity"
+
+    # Select the target-share profile for this stage. Every downstream function reads
+    # the module-level TARGET_DOMAIN_SHARE rather than args.stage directly.
+    global TARGET_DOMAIN_SHARE
+    TARGET_DOMAIN_SHARE = STAGE_TARGET_SHARES[args.stage]
 
     # Resolve depth shortcuts
     for _d in DEPTH_SHORTCUTS:
