@@ -707,13 +707,17 @@ def main():
         # Legacy: model flags given without --artifact → default to model
         args.artifact = "model"
 
-    # Hardcode repo path depending on artifact type
-    if args.artifact == "model":
-        args.repo = f"{username}/model"
-    elif args.artifact == "tokenizer":
-        args.repo = f"{username}/tokenizer"
-    elif args.artifact == "dataset":
-        args.repo = f"{username}/dataset"
+    # Set default repo path per artifact type, but respect explicit --repo from user
+    if args.repo is None:
+        if args.artifact == "model":
+            args.repo = f"{username}/model"
+        elif args.artifact == "tokenizer":
+            args.repo = f"{username}/tokenizer"
+        elif args.artifact == "dataset":
+            args.repo = f"{username}/dataset"
+    elif "/" not in args.repo:
+        # bare name like "dataset-d16" → prepend username
+        args.repo = f"{username}/{args.repo}"
 
     # ── HF login (shared for all artifacts) ──────────────────────────────────
     api = _hf_login(args.repo, public=args.public)
