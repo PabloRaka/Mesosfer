@@ -546,6 +546,24 @@ def test_checkpoint_every_gb_can_disable_checkpoints(monkeypatch, tmp_path, caps
     assert calls == [], f"checkpoint written despite a 9999 GB threshold: {calls}"
 
 
+def test_shard_buffer_flushes_on_byte_cap_before_doc_count(monkeypatch, tmp_path, capsys):
+    """current_shard must flush once buffered chars cross SHARD_BUFFER_MAX_CHARS, even
+    when args.shard_size (doc count) is nowhere near being hit — otherwise a run drawing
+    large documents holds an unbounded amount of text in RAM before ever flushing."""
+    _patch_streaming(monkeypatch)
+    monkeypatch.setattr(prepare_data, "SHARD_BUFFER_MAX_CHARS", 2000)
+    first, _ = _two_batches()
+    out = str(tmp_path)
+
+    class HighDocCount(_Args):
+        shard_size = 100_000  # far above the ~4000 docs this run produces
+
+    prepare_data.interleaved_shuffle_main(HighDocCount(), list(first), out)
+    capsys.readouterr()
+
+    assert _shard_count(tmp_path) > 1, "byte cap did not flush before the doc-count cap"
+
+
 # ---------------------------------------------------------------------------
 # ClimbMix pre-download must stay pinned to a bare-minimum validation shard.
 #

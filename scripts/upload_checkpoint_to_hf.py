@@ -607,7 +607,7 @@ def top_level_menu(base_dir: str) -> str:
 
 # ── HF login helper ───────────────────────────────────────────────────────────
 
-def _hf_login(repo: str) -> object | None:
+def _hf_login(repo: str, public: bool = False) -> object | None:
     """Import HfApi, verify login, ensure repo exists. Returns api or None."""
     try:
         from huggingface_hub import HfApi
@@ -625,8 +625,11 @@ def _hf_login(repo: str) -> object | None:
         err("Run: hf auth login")
         return None
 
-    api.create_repo(repo_id=repo, repo_type="model", private=True, exist_ok=True)
-    info(f"Repo: {repo}\n")
+    # Private unless asked otherwise. exist_ok means this never changes the visibility of a
+    # repo that already exists — an accidental --public cannot expose an existing private one,
+    # and a repo you made public on the Hub stays public without the flag.
+    api.create_repo(repo_id=repo, repo_type="model", private=not public, exist_ok=True)
+    info(f"Repo: {repo} ({'public' if public else 'private'} if newly created)\n")
     return api
 
 
@@ -647,6 +650,9 @@ def main():
                         help="HuggingFace repo ID (default: HF_REPO env var, e.g. johndoe/mesosfer-checkpoints)")
     parser.add_argument("--base-dir", type=str, default=None,
                         help="Override mesosfer cache dir (default: ~/.cache/mesosfer)")
+    parser.add_argument("--public", action="store_true",
+                        help="Create the repo public if it does not exist yet (default: private). "
+                             "Never changes an existing repo's visibility.")
 
     # Model checkpoint flags (backward-compatible)
     g = parser.add_argument_group("model checkpoint")
@@ -710,7 +716,7 @@ def main():
         args.repo = f"{username}/dataset"
 
     # ── HF login (shared for all artifacts) ──────────────────────────────────
-    api = _hf_login(args.repo)
+    api = _hf_login(args.repo, public=args.public)
     if api is None:
         return
 
