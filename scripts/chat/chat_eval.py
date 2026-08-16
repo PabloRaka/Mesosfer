@@ -378,7 +378,8 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for categorical evaluation')
     parser.add_argument('-g', '--model-tag', '--depth', type=str, default=None, help='Model tag or depth to load (e.g. d12)')
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
-    parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
+    parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate across all tasks')
+    parser.add_argument('--gsm8k-max-problems', type=int, default=None, help='Max problems specifically for GSM8K (e.g. 100)')
     parser.add_argument('--domain-eval', type=int, default=0, help='1 = also run cyber/coding domain evals')
     parser.add_argument('--domain-eval-domains', type=str, default='cyber,coding', help='Comma-separated domain eval groups: cyber,coding')
     parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
@@ -410,6 +411,7 @@ if __name__ == "__main__":
     # Run all the task evaluations sequentially
     results = {}
     for task_name in task_names:
+        task_max_problems = args.gsm8k_max_problems if (task_name == "GSM8K" and args.gsm8k_max_problems is not None) else args.max_problems
         acc = run_chat_eval(
             task_name,
             model, tokenizer, engine,
@@ -418,7 +420,7 @@ if __name__ == "__main__":
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
-            max_problems=args.max_problems,
+            max_problems=task_max_problems,
         )
         results[task_name] = acc
         print0(f"{task_name} accuracy: {100 * acc:.2f}%")
