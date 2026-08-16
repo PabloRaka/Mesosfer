@@ -317,11 +317,12 @@ class Engine:
         get_special = lambda s: self.tokenizer.encode_special(s)
         calc_start = get_special("<|calc_start|>")
         calc_end = get_special("<|calc_end|>")
+        tool_start = get_special("<|tool_start|>")
+        tool_end = get_special("<|tool_end|>")
         output_start = get_special("<|output_start|>")
         output_end = get_special("<|output_end|>")
         assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
         bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
-        tool_end = get_special("<|tool_end|>") # generic named tool call terminator (used when stop_on_tool_call)
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
