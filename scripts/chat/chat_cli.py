@@ -19,8 +19,12 @@ DEFAULT_SYSTEM_PROMPT = (
     "Identitas asisten adalah Mesosfer. Mesosfer adalah AI yang cerdas, sopan, dan berfokus pada cybersecurity defensif, pemrograman, dan penalaran teknis.\n\n"
     "Available tools:\n"
     "- python: execute Python code for calculation or logic. Arguments: {\"code\": \"<str>\"}\n"
+    "- terminal: execute shell/terminal command in sandbox. Arguments: {\"command\": \"<str>\"}\n"
+    "- subagent: delegate task to specialized autonomous subagent (roles: soc_analyst, code_auditor, threat_intel, recon_specialist, sysadmin, math_reasoner). Arguments: {\"role\": \"<role>\", \"task\": \"<task>\", \"context\": \"<str>\"}\n"
     "- subnet: calculate network CIDR and IP metrics. Arguments: {\"cidr\": \"<str>\"}\n"
-    "- bash: run shell commands in an isolated sandbox. Arguments: {\"command\": \"<str>\"}"
+    "- write_file: save text content to a file. Arguments: {\"filename\": \"<str>\", \"content\": \"<str>\"}\n"
+    "- read_file: read content of a workspace file. Arguments: {\"filename\": \"<str>\"}\n"
+    "- grep_files: search regex pattern across files. Arguments: {\"pattern\": \"<str>\"}"
 )
 
 parser = argparse.ArgumentParser(description='Chat with the model')
@@ -280,7 +284,7 @@ while True:
 
     if user_input.lower() in ['help', '/help', '?']:
         print_console("Commands: /clear, /system [prompt], /save [name.md], /temperature <0-2>, /topk <1-200>, /rep <1.0-2.0>, /maxtokens <1-4096>, /exit")
-        print_console("Sandbox:  /run <python code>, /bash <command>, /subnet <cidr>, /sandbox [status|dir <path>]")
+        print_console("Sandbox:  /run <python>, /bash <cmd>, /subagent <role> <task>, /subnet <cidr>, /ls, /grep <pattern>, /sandbox [status|dir <path>]")
         print_console("Multi-line: End a line with '\\' to write the next line.")
         print_console("Ctrl+C during generation will stop the response stream safely.")
         continue
@@ -428,12 +432,42 @@ while True:
             print_console("Usage: /subnet <cidr> (e.g. /subnet 192.168.10.0/26)")
         continue
 
+    if user_input.lower().startswith('/subagent'):
+        parts = user_input.split(maxsplit=2)
+        if len(parts) >= 3:
+            role = parts[1]
+            task = parts[2]
+            print_console(f"{C.gray}Delegating task to subagent [{role}]...{C.reset}")
+            import json as _json
+            res = sandbox.execute_subagent(role, task)
+            print(f"{C.green}{_json.dumps(res, indent=2)}{C.reset}")
+        else:
+            print_console("Usage: /subagent <soc_analyst|code_auditor|threat_intel|recon_specialist|sysadmin|math_reasoner> <task description>")
+        continue
+
+    if user_input.lower().startswith(('/ls', '/files')):
+        files = sandbox.list_files()
+        import json as _json
+        print(f"{C.green}{_json.dumps(files, indent=2)}{C.reset}")
+        continue
+
+    if user_input.lower().startswith('/grep'):
+        parts = user_input.split(maxsplit=1)
+        if len(parts) > 1:
+            import json as _json
+            res = sandbox.grep_files(parts[1].strip())
+            print(f"{C.green}{_json.dumps(res, indent=2)}{C.reset}")
+        else:
+            print_console("Usage: /grep <regex_pattern>")
+        continue
+
     if user_input.lower().startswith('/sandbox'):
         parts = user_input.split()
         if len(parts) == 1 or parts[1] == 'status':
             mode = 'Docker' if sandbox.use_docker else 'Local subprocess'
             print_console(f"Sandbox mode: {C.bold}{mode}{C.reset}")
             print_console(f"Workspace: {C.bold}{sandbox.workspace_dir}{C.reset}")
+            print_console(f"Subagents active: {C.bold}{len(sandbox.subagents)}{C.reset}")
         elif parts[1] == 'dir' and len(parts) > 2:
             sandbox.workspace_dir = parts[2]
             os.makedirs(sandbox.workspace_dir, exist_ok=True)

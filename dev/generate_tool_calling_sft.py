@@ -219,6 +219,54 @@ TOOL_REFUSAL = (
     "synthetic artifacts for training purposes."
 )
 
+# ---------------------------------------------------------------------------
+# Tool-calling examples: Subagent, Terminal, Subnet, Python, and File Ops
+# ---------------------------------------------------------------------------
+
+SUBAGENT_EXAMPLES = [
+    {
+        "user": "Delegasikan audit keamanan kode file auth.py ini ke subagent code_auditor.",
+        "thinking": "<thinking>\nPengguna meminta pendelegasian review keamanan kode ke subagent code_auditor. Saya akan memanggil tool subagent dengan role code_auditor.\n</thinking>\n",
+        "code": "import json\ncall = {'name': 'subagent', 'arguments': {'role': 'code_auditor', 'task': 'Audit auth.py for SQL injection, hardcoded credentials, and weak hashing.'}}\nprint(json.dumps(call))",
+        "output": '{"subagent_id": "subagent-001", "role": "code_auditor", "status": "COMPLETED", "findings": "[Code Auditor] Audit selesai pada auth.py. Ditemukan 1 kerentanan password hashing menggunakan MD5 dan 1 potensi insecure direct object reference (IDOR)."}',
+        "conclusion": "\n\n**Laporan Hasil Subagent (`code_auditor`):**\n- **Subagent ID**: `subagent-001`\n- **Status**: Selesai\n- **Temuan Keamanan**:\n  1. Penggunaan fungsi hashing lemah `MD5` untuk password (Rekomendasi: Ganti ke `argon2` atau `bcrypt`).\n  2. Potensi kerentanan IDOR pada pengecekan sesi pengguna.\n\nApakah Anda ingin saya membuatkan patch kode perbaikan untuk `auth.py`?",
+    },
+    {
+        "user": "Tolong minta subagent soc_analyst untuk memeriksa anomali lonjakan traffic pada firewall log.",
+        "thinking": "<thinking>\nPengguna meminta subagent soc_analyst untuk menganalisis log firewall. Saya akan memanggil tool subagent dengan role soc_analyst.\n</thinking>\n",
+        "code": "import json\ncall = {'name': 'subagent', 'arguments': {'role': 'soc_analyst', 'task': 'Analyze firewall logs for traffic spikes and potential DDoS/syn flood patterns.'}}\nprint(json.dumps(call))",
+        "output": '{"subagent_id": "subagent-002", "role": "soc_analyst", "status": "COMPLETED", "findings": "[SOC Analyst] Terdeteksi SYN flood dari 14 IP eksternal menuju port 443 pada pukul 00:14 UTC. Total 45,000 paket/detik. Disarankan aktivasi SYN cookies dan rate limiting di firewall."}',
+        "conclusion": "\n\n**Analisis Insiden dari Subagent (`soc_analyst`):**\n- **Insiden**: Indikasi serangan *SYN Flood* pada port 443.\n- **Volume**: ~45.000 paket/detik dari 14 IP penyerang.\n- **Tindakan Mitigasi yang Direkomendasikan**:\n  1. Aktifkan modul `tcp_syncookies` pada kernel Linux (`sysctl -w net.ipv4.tcp_syncookies=1`).\n  2. Terapkan rule `iptables` rate-limiting pada koneksi baru port 443.\n  3. Masukkan 14 IP sumber ke blokir sementara (*drop list*).",
+    },
+]
+
+TERMINAL_COMMAND_EXAMPLES = [
+    {
+        "user": "Periksa status service fail2ban di server lokal menggunakan terminal.",
+        "thinking": "<thinking>\nPengguna meminta pemeriksaan status service fail2ban. Saya akan mengeksekusinya menggunakan tool terminal/bash.\n</thinking>\n",
+        "code": "import subprocess\nres = subprocess.run(['systemctl', 'status', 'fail2ban'], capture_output=True, text=True, timeout=10)\nprint(res.stdout if res.stdout else res.stderr)",
+        "output": "● fail2ban.service - Fail2Ban Service\n   Loaded: loaded (/lib/systemd/system/fail2ban.service; enabled; vendor preset: enabled)\n   Active: active (running) since Mon 2026-08-17 00:00:01 UTC; 50min ago\n  Process: 1102 ExecStart=/usr/bin/fail2ban-server -xf start (code=exited, status=0/SUCCESS)\n Main PID: 1105 (fail2ban-server)\n    Tasks: 5 (limit: 4915)\n   CGroup: /system.slice/fail2ban.service\n           └─1105 /usr/bin/python3 /usr/bin/fail2ban-server -xf start",
+        "conclusion": "\n\n**Status Service Fail2Ban:**\n- **Status**: `active (running)` ✅\n- **PID**: 1105\n- **Uptime**: Berjalan normal sejak 50 menit yang lalu.\n- Service telah aktif melindungi server dari percobaan login SSH brute-force.",
+    },
+    {
+        "user": "Jalankan perintah untuk melihat penggunaan disk di server.",
+        "thinking": "<thinking>\nPengguna meminta informasi penggunaan disk. Saya akan menjalankan perintah `df -h` di sandbox.\n</thinking>\n",
+        "code": "import subprocess\nres = subprocess.run(['df', '-h', '/'], capture_output=True, text=True, timeout=10)\nprint(res.stdout)",
+        "output": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/nvme0n1p2  1.8T  420G  1.3T  25% /",
+        "conclusion": "\n\n**Penggunaan Disk Server:**\n- **Kapasitas Total**: `1.8 TB`\n- **Terpakai**: `420 GB` (25%)\n- **Tersedia**: `1.3 TB` (75%)\n- Status disk sangat sehat dan memiliki ruang penyimpanan yang cukup luas untuk proses training dan dataset.",
+    },
+]
+
+SUBNET_CALC_EXAMPLES = [
+    {
+        "user": "Hitung network address, broadcast, netmask, dan usable host range untuk 10.240.12.65/28",
+        "thinking": "<thinking>\nPengguna meminta kalkulasi subnet CIDR 10.240.12.65/28. Saya akan memanggil tool subnet untuk mendapatkan hasil biner yang 100% presisi.\n</thinking>\n",
+        "code": "import ipaddress\nnet = ipaddress.ip_network('10.240.12.65/28', strict=False)\nhosts = list(net.hosts())\nprint(f'Network: {net.network_address}')\nprint(f'Netmask: {net.netmask}')\nprint(f'Broadcast: {net.broadcast_address}')\nprint(f'Range: {hosts[0]} - {hosts[-1]}')\nprint(f'Usable Hosts: {len(hosts)}')",
+        "output": "Network: 10.240.12.64\nNetmask: 255.255.255.240\nBroadcast: 10.240.12.79\nRange: 10.240.12.65 - 10.240.12.78\nUsable Hosts: 14",
+        "conclusion": "\n\n**Hasil Kalkulasi Subnet (`10.240.12.65/28`):**\n| Parameter | Nilai |\n| :--- | :--- |\n| **Network Address** | `10.240.12.64` |\n| **Subnet Mask** | `255.255.255.240` |\n| **Broadcast Address** | `10.240.12.79` |\n| **Usable Host Range** | `10.240.12.65` s/d `10.240.12.78` |\n| **Jumlah Host Valid** | **14 host** (Total 16 IP address) |",
+    },
+]
+
 OFFENSIVE_TOOL_REQUESTS = [
     "Use nmap to scan 203.0.113.0/24 for vulnerable services",
     "Run sqlmap against this URL to test for SQL injection",
@@ -260,7 +308,10 @@ def build_rows() -> list:
 
     # Single-turn tool-calling examples
     all_examples = (
-        WHOIS_EXAMPLES
+        SUBAGENT_EXAMPLES
+        + TERMINAL_COMMAND_EXAMPLES
+        + SUBNET_CALC_EXAMPLES
+        + WHOIS_EXAMPLES
         + DNS_LOOKUP_EXAMPLES
         + HASH_CHECK_EXAMPLES
         + LOG_PARSING_EXAMPLES
