@@ -42,9 +42,9 @@ parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('d
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # Model loading
-parser.add_argument("--checkpoint-source", type=str, default="base", choices=["base", "sft"], help="checkpoint source to fine-tune from: base|sft")
-parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
-parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
+parser.add_argument("-i", "--checkpoint-source", "--source", type=str, default="base", choices=["base", "sft"], help="checkpoint source to fine-tune from: base|sft")
+parser.add_argument("-g", "--model-tag", "--depth", type=str, default=None, help="model tag or depth to load from")
+parser.add_argument("-s", "--model-step", "--step", type=int, default=None, help="model step to load from")
 parser.add_argument("--load-optimizer", type=int, default=1, help="warm-start optimizer from pretrained checkpoint (0=no, 1=yes)")
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)")
