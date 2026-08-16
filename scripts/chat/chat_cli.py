@@ -14,6 +14,12 @@ from mesosfer.utils.common import compute_init, autodetect_device_type
 from mesosfer.eval.engine import Engine
 from mesosfer.utils.checkpoint_manager import load_model
 
+DEFAULT_SYSTEM_PROMPT = (
+    "Kamu adalah Mesosfer, asisten kecerdasan buatan (AI) yang cerdas, sopan, dan berfokus pada "
+    "cybersecurity defensif, pemrograman, dan penalaran teknis. "
+    "Kamu selalu memberikan jawaban yang akurat, terstruktur, dan membantu pengguna."
+)
+
 parser = argparse.ArgumentParser(description='Chat with the model')
 parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|rl")
 parser.add_argument('-g', '--model-tag', '--depth', type=str, default=None, help='Model tag or depth to load (e.g. d12)')
@@ -22,9 +28,17 @@ parser.add_argument('-p', '--prompt', type=str, default='', help='Prompt the mod
 parser.add_argument('-t', '--temperature', type=float, default=0.6, help='Temperature for generation')
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Top-k sampling parameter')
 parser.add_argument('-m', '--max-tokens', type=int, default=512, help='Maximum new tokens per response (default: 512)')
+parser.add_argument('--repetition-penalty', '--rep-penalty', type=float, default=1.1, help='Repetition penalty (default: 1.1)')
+parser.add_argument('--system-prompt', type=str, default=DEFAULT_SYSTEM_PROMPT, help='System prompt for Mesosfer persona')
+parser.add_argument('--no-system-prompt', action='store_true', help='Disable system prompt')
 parser.add_argument('--plain', action='store_true', help='Disable styled terminal UI')
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
 args = parser.parse_args()
+
+if args.no_system_prompt:
+    active_system_prompt = ""
+else:
+    active_system_prompt = args.system_prompt.strip()
 
 
 # Terminal UI helpers
@@ -164,8 +178,8 @@ def print_welcome(meta):
         f"{C.purple}{C.bold}Session Info{C.reset}",
         f"model tag : {args.model_tag or 'auto'}",
         f"layers    : {depth} · embd: {embd}",
-        f"sampler   : top-k: {args.top_k} · temp: {args.temperature}",
-        f"workspace : {cwd_name}",
+        f"sampler   : temp: {args.temperature} · rep-pen: {args.repetition_penalty}",
+        f"system    : {'Mesosfer Persona' if active_system_prompt else 'None'}",
     ]
     boxed(" Mesosfer Chat CLI ", left, right)
     print(f"{C.gray}? for shortcuts · Ctrl+C or /exit to quit{C.reset}")
@@ -248,9 +262,22 @@ while True:
         continue
 
     if user_input.lower() in ['help', '/help', '?']:
-        print_console("Commands: /clear, /save [name.md], /temperature <0-2>, /topk <1-200>, /maxtokens <1-4096>, /exit")
+        print_console("Commands: /clear, /system [prompt], /save [name.md], /temperature <0-2>, /topk <1-200>, /rep <1.0-2.0>, /maxtokens <1-4096>, /exit")
         print_console("Multi-line: End a line with '\\' to write the next line.")
         print_console("Ctrl+C during generation will stop the response stream safely.")
+        continue
+
+    if user_input.lower().startswith('/system'):
+        parts = user_input.split(maxsplit=1)
+        if len(parts) == 1:
+            curr = active_system_prompt if active_system_prompt else "(none)"
+            print_console(f"Current System Prompt: {curr}")
+        else:
+            active_system_prompt = parts[1].strip()
+            # reset conversation tokens so new system prompt applies cleanly
+            conversation_tokens = [bos]
+            chat_history = []
+            print_console("System prompt updated and conversation context reset.")
         continue
 
     if user_input.lower().startswith('/save'):
@@ -275,7 +302,11 @@ while True:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write("# Mesosfer Chat Session\n")
                 f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Model Source: {args.source.upper()}\n\n")
+                f.write(f"Model Source: {args.source.upper()}\n")
+                if active_system_prompt:
+                    f.write(f"System Prompt: {active_system_prompt}\n\n")
+                else:
+                    f.write("\n")
                 f.write("---\n\n")
                 for turn in chat_history:
                     role = turn["role"].upper()
@@ -310,6 +341,18 @@ while True:
                 print_console("Invalid top-k.")
         continue
 
+    if user_input.lower().startswith(('/rep', '/repetition_penalty', '/rep_penalty')):
+        parts = user_input.split()
+        if len(parts) == 1:
+            print_console(f"Repetition Penalty: {args.repetition_penalty}")
+        else:
+            try:
+                args.repetition_penalty = max(1.0, min(2.5, float(parts[1])))
+                print_console(f"Repetition penalty set to {args.repetition_penalty}")
+            except ValueError:
+                print_console("Invalid repetition penalty.")
+        continue
+
     if user_input.lower().startswith(('/maxtokens', '/max_tokens', '/max-tokens')):
         parts = user_input.split()
         if len(parts) == 1:
@@ -326,7 +369,14 @@ while True:
         continue
 
     # Add User message to the conversation and history
-    user_tokens = tokenizer.encode(user_input)
+    # If this is the first turn and a system prompt is active, prepend it
+    is_first_turn = (len(chat_history) == 0)
+    if is_first_turn and active_system_prompt:
+        turn_prompt_text = f"{active_system_prompt}\n\n{user_input}"
+    else:
+        turn_prompt_text = user_input
+
+    user_tokens = tokenizer.encode(turn_prompt_text)
     input_tokens_count = len(user_tokens)
     
     # Calculate context before generation
@@ -346,6 +396,7 @@ while True:
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "top_k": args.top_k,
+        "repetition_penalty": args.repetition_penalty,
     }
     response_tokens = []
     response_text_list = []

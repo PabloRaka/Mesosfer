@@ -166,6 +166,24 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
         return torch.multinomial(probs, num_samples=1, generator=rng)
 
 # -----------------------------------------------------------------------------
+def apply_repetition_penalty(logits, token_history, penalty=1.0):
+    """
+    Apply repetition penalty to logits for tokens that have appeared in history.
+    Positive logits: logit / penalty
+    Negative logits: logit * penalty
+    """
+    if penalty == 1.0 or not token_history:
+        return logits
+    for row_idx, history in enumerate(token_history):
+        if not history:
+            continue
+        unique_tokens = list(set(history))
+        row_logits = logits[row_idx, unique_tokens]
+        penalized = torch.where(row_logits > 0, row_logits / penalty, row_logits * penalty)
+        logits[row_idx, unique_tokens] = penalized
+    return logits
+
+# -----------------------------------------------------------------------------
 
 class RowState:
     # Per-row state tracking during generation
@@ -183,7 +201,7 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, stop_on_tool_call=False):
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, repetition_penalty=1.0, seed=42, stop_on_tool_call=False):
         """Same as generate, but does single prefill and then clones the KV cache.
 
         stop_on_tool_call: when True, a row completes as soon as it emits <|tool_end|>
@@ -252,8 +270,15 @@ class Engine:
             if all(state.completed for state in row_states):
                 break
 
+            # Apply repetition penalty if configured
+            if repetition_penalty > 1.0:
+                history = [state.current_tokens for state in row_states]
+                logits_to_sample = apply_repetition_penalty(logits.clone(), history, repetition_penalty)
+            else:
+                logits_to_sample = logits
+
             # Sample the next token for each row
-            next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
+            next_ids = sample_next_token(logits_to_sample, rng, temperature, top_k)  # (B, 1)
             sampled_tokens = next_ids[:, 0].tolist()
 
             # Process each row: choose the next token, update state, optional tool use
