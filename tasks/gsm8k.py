@@ -19,18 +19,44 @@ from datasets import load_dataset
 from tasks.common import Task
 
 
-GSM_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
+GSM_RE = re.compile(r"####\s*([\$]?\s*[\-0-9\.\,]+)")
 def extract_answer(completion):
     """
-    Extract the numerical answer after #### marker.
-    Follows official code for normalization:
-    https://github.com/openai/grade-school-math/blob/3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/dataset.py#L28
+    Extract numerical answer from completion supporting:
+    - Official OpenAI GSM8K format (#### 123)
+    - LaTeX boxed format (\\boxed{123})
+    - Conversational answers ("The answer is 123", "is 123", "= 123")
+    - Fallback to the last standalone number in the text
     """
+    if not completion:
+        return None
+
+    # 1. Official OpenAI GSM8K marker: #### 123
     match = GSM_RE.search(completion)
     if match:
-        match_str = match.group(1).strip()
-        match_str = match_str.replace(",", "")
-        return match_str
+        raw = match.group(1).replace("$", "").replace(",", "").strip()
+        if raw:
+            return raw
+
+    # 2. LaTeX boxed marker: \boxed{123}
+    match = re.search(r"\\boxed\{\s*[\$]?\s*([\-0-9\.\,]+)\s*\}", completion)
+    if match:
+        raw = match.group(1).replace("$", "").replace(",", "").strip()
+        if raw:
+            return raw
+
+    # 3. Conversational patterns: "The answer is 123" / "equals 123"
+    matches = re.findall(r"(?:the answer is|equals?|=|\bis\b)\s*[\$]?\s*([\-0-9\.\,]+)", completion, re.IGNORECASE)
+    if matches:
+        raw = matches[-1].replace(",", "").strip().rstrip(".")
+        if raw:
+            return raw
+
+    # 4. Fallback: find all numbers in text and pick the last one
+    numbers = re.findall(r"[\-+]?\d+(?:\.\d+)?", completion)
+    if numbers:
+        return numbers[-1].rstrip(".")
+
     return None
 
 
@@ -103,9 +129,15 @@ class GSM8K(Task):
         # Extract both the ground truth answer and the predicted answer
         ref_num = extract_answer(last_text_part)
         pred_num = extract_answer(assistant_response)
-        # Compare and return the success as int
-        is_correct = int(pred_num == ref_num)
-        return is_correct
+        if ref_num is None or pred_num is None:
+            return 0
+        if pred_num == ref_num:
+            return 1
+        try:
+            import math
+            return int(math.isclose(float(pred_num), float(ref_num), rel_tol=1e-4, abs_tol=1e-4))
+        except (ValueError, OverflowError):
+            return int(pred_num == ref_num)
 
     def reward(self, conversation, assistant_response):
         """
