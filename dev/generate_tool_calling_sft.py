@@ -36,12 +36,28 @@ def text_part(content: str) -> dict:
     return {"type": "text", "text": content}
 
 
+def calc_part(code: str) -> dict:
+    return {"type": "calc", "text": code}
+
+
+def calc_output_part(result: str) -> dict:
+    return {"type": "calc_output", "text": result}
+
+
+def tool_part(payload: str) -> dict:
+    return {"type": "tool", "text": payload}
+
+
+def tool_output_part(result: str) -> dict:
+    return {"type": "tool_output", "text": result}
+
+
 def python_part(code: str) -> dict:
-    return {"type": "python", "text": code}
+    return {"type": "calc", "text": code}
 
 
 def output_part(result: str) -> dict:
-    return {"type": "python_output", "text": result}
+    return {"type": "calc_output", "text": result}
 
 
 def make_tool_conversation(
