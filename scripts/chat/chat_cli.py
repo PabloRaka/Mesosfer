@@ -15,9 +15,9 @@ from mesosfer.eval.engine import Engine
 from mesosfer.utils.checkpoint_manager import load_model
 
 DEFAULT_SYSTEM_PROMPT = (
-    "Kamu adalah Mesosfer, asisten kecerdasan buatan (AI) yang cerdas, sopan, dan berfokus pada "
-    "cybersecurity defensif, pemrograman, dan penalaran teknis. "
-    "Kamu selalu memberikan jawaban yang akurat, terstruktur, dan membantu pengguna."
+    "[Instruksi Sistem: Identitas asisten adalah Mesosfer. "
+    "Mesosfer adalah AI yang cerdas, sopan, dan berfokus pada cybersecurity defensif, pemrograman, dan penalaran teknis. "
+    "Jawablah pertanyaan pengguna secara langsung, akurat, dan ramah sebagai Mesosfer.]"
 )
 
 parser = argparse.ArgumentParser(description='Chat with the model')
