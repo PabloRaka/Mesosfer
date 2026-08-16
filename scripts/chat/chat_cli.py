@@ -16,9 +16,11 @@ from mesosfer.utils.checkpoint_manager import load_model
 from mesosfer.sandbox import Sandbox, get_default_sandbox
 
 DEFAULT_SYSTEM_PROMPT = (
-    "[Instruksi Sistem: Identitas asisten adalah Mesosfer. "
-    "Mesosfer adalah AI yang cerdas, sopan, dan berfokus pada cybersecurity defensif, pemrograman, dan penalaran teknis. "
-    "Jawablah pertanyaan pengguna secara langsung, akurat, dan ramah sebagai Mesosfer.]"
+    "Identitas asisten adalah Mesosfer. Mesosfer adalah AI yang cerdas, sopan, dan berfokus pada cybersecurity defensif, pemrograman, dan penalaran teknis.\n\n"
+    "Available tools:\n"
+    "- python: execute Python code for calculation or logic. Arguments: {\"code\": \"<str>\"}\n"
+    "- subnet: calculate network CIDR and IP metrics. Arguments: {\"cidr\": \"<str>\"}\n"
+    "- bash: run shell commands in an isolated sandbox. Arguments: {\"command\": \"<str>\"}"
 )
 
 parser = argparse.ArgumentParser(description='Chat with the model')
@@ -228,6 +230,9 @@ except FileNotFoundError as e:
 bos = tokenizer.get_bos_token_id()
 user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
 assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
+tool_start, tool_end = tokenizer.encode_special("<|tool_start|>"), tokenizer.encode_special("<|tool_end|>")
+calc_start, calc_end = tokenizer.encode_special("<|calc_start|>"), tokenizer.encode_special("<|calc_end|>")
+output_start, output_end = tokenizer.encode_special("<|output_start|>"), tokenizer.encode_special("<|output_end|>")
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
@@ -479,14 +484,38 @@ while True:
     renderer = CodeBlockState()
     t_start = time.time()
     try:
+        in_tool_disp = False
+        in_output_disp = False
         for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
             token = token_column[0] # pop the batch dimension (num_samples=1)
             response_tokens.append(token)
             if token == assistant_end:
                 break
+            if token in (tool_start, calc_start):
+                in_tool_disp = True
+                print(f"\n{C.purple}╭─ {C.teal}{C.bold}⚙ Tool Call{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 18)}╮{C.reset}\n{C.purple}│{C.reset} {C.cyan}", end="", flush=True)
+                continue
+            if token in (tool_end, calc_end):
+                in_tool_disp = False
+                print(f"{C.reset}\n{C.purple}├─ {C.teal}{C.bold}Sandbox Result{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 21)}┤{C.reset}\n", end="", flush=True)
+                continue
+            if token == output_start:
+                in_output_disp = True
+                print(f"{C.purple}│{C.reset} {C.green}", end="", flush=True)
+                continue
+            if token == output_end:
+                in_output_disp = False
+                print(f"{C.reset}\n{C.purple}╰{'─' * max(10, TERM_WIDTH - 2)}╯{C.reset}\n", end="", flush=True)
+                continue
+
             token_text = tokenizer.decode([token])
             response_text_list.append(token_text)
-            print(renderer.feed(token_text), end="", flush=True)
+            if in_tool_disp:
+                print(f"{C.cyan}{token_text}{C.reset}", end="", flush=True)
+            elif in_output_disp:
+                print(f"{C.green}{token_text}{C.reset}", end="", flush=True)
+            else:
+                print(renderer.feed(token_text), end="", flush=True)
     except KeyboardInterrupt:
         print(f"\n{C.orange}[Generation interrupted by user]{C.reset}")
     finally:
