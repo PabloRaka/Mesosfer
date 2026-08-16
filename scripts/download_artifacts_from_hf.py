@@ -124,7 +124,7 @@ def _resolve_username(cli_value: str | None) -> str:
 # ── Constants ────────────────────────────────────────────────────────────────
 
 DEFAULT_REPO = None  # resolved at runtime via _resolve_username()
-DEFAULT_DEPTH = "d32"
+DEFAULT_DEPTH = "d12"
 
 SOURCE_DIR_MAP = {
     "base": "base_checkpoints",
