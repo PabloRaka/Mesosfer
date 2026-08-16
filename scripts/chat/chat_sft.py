@@ -53,6 +53,7 @@ parser.add_argument("--max-seq-len", type=int, default=None, help="max context l
 parser.add_argument("--device-batch-size", type=int, default=None, help="per-device batch size (default: inherit from pretrain)")
 parser.add_argument("--total-batch-size", type=int, default=None, help="total batch size in tokens (default: inherit from pretrain)")
 # Optimization (default: inherit from pretrained checkpoint)
+parser.add_argument("--learning-rate", "--lr", type=float, default=None, help="override learning rate (AdamW/Muon)")
 parser.add_argument("--embedding-lr", type=float, default=None, help="learning rate for embedding parameters (Adam) (default: inherit from pretrain)")
 parser.add_argument("--unembedding-lr", type=float, default=None, help="learning rate for unembedding parameters (Adam) (default: inherit from pretrain)")
 parser.add_argument("--matrix-lr", type=float, default=None, help="learning rate for matrix parameters (Muon) (default: inherit from pretrain)")
@@ -235,10 +236,16 @@ scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
-# Override the initial learning rate as a fraction of the base learning rate
-for group in optimizer.param_groups:
-    group["lr"] = group["lr"] * args.init_lr_frac
-    group["initial_lr"] = group["lr"]
+# Override the initial learning rate as a fraction of the base learning rate or explicit --learning-rate
+if args.learning_rate is not None:
+    for group in optimizer.param_groups:
+        group["lr"] = args.learning_rate
+        group["initial_lr"] = args.learning_rate
+    print0(f"Overriding optimizer learning rate with --learning-rate={args.learning_rate}")
+else:
+    for group in optimizer.param_groups:
+        group["lr"] = group["lr"] * args.init_lr_frac
+        group["initial_lr"] = group["lr"]
 
 # SFT data mixture and DataLoader
 sft_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "sft"))
