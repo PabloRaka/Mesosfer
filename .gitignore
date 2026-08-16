@@ -58,3 +58,7 @@ data/sft/numinamath_*.jsonl
 data/sft/aquilax_*.jsonl
 data/sft/xlam_*.jsonl
 scripts/download_sft_direct.py
+
+# Generated benchmark cards
+benchmark_*.html
+benchmark_card.html
