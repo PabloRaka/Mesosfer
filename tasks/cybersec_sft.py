@@ -246,6 +246,12 @@ class ChatHistoryDistilledSFT(RobustCustomJSON):
         super().__init__(filepath=_sft_path("chat_history_distilled_sft.jsonl", sft_dir), **kwargs)
 
 
+class RealAgenticToolCalling(RobustCustomJSON):
+    """Real pair-programming agentic tool calling traces converted to Mesosfer native multipart JSON format."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("real_agentic_tool_calling_sft.jsonl", sft_dir), **kwargs)
+
+
 class PrimusInstruct(RobustCustomJSON):
     """Trend Micro Primus-Instruct cybersecurity instruction pairs. ~100K rows (gated)."""
     def __init__(self, sft_dir=None, **kwargs):
@@ -394,6 +400,7 @@ def build_cybersec_sft_tasks(
     mesosfer_validation_epochs: int = 0,
     gemini_teacher_epochs: int = 4,
     chat_history_epochs: int = 4,
+    real_agentic_epochs: int = 2,
     primus_instruct_epochs: int = 1,
     primus_reasoning_epochs: int = 1,
     cybernative_vuln_epochs: int = 3,
@@ -475,6 +482,8 @@ def build_cybersec_sft_tasks(
         tasks.append(GeminiTeacher(sft_dir=sft_dir))
     for _ in range(chat_history_epochs):
         tasks.append(ChatHistoryDistilledSFT(sft_dir=sft_dir))
+    for _ in range(real_agentic_epochs):
+        tasks.append(RealAgenticToolCalling(sft_dir=sft_dir))
 
     # External HF datasets (only included if files exist — downloaded via download_sft_data.py)
     for _ in range(primus_instruct_epochs):

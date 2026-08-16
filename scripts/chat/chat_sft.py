@@ -83,6 +83,7 @@ parser.add_argument("--mythos-tool-calling-epochs", type=int, default=0, help="e
 parser.add_argument("--mesosfer-validation-epochs", type=int, default=0, help="epochs of mesosfer_validation_conversations (0 = held-out eval set, do not train)")
 parser.add_argument("--gemini-teacher-epochs", type=int, default=4, help="epochs of gemini_teacher_conversations (373 rows)")
 parser.add_argument("--chat-history-epochs", type=int, default=4, help="epochs of chat_history_distilled_sft (pair-programming & troubleshooting traces)")
+parser.add_argument("--real-agentic-epochs", type=int, default=2, help="epochs of real_agentic_tool_calling_sft (real-world tool traces in Mesosfer format)")
 parser.add_argument("--primus-instruct-epochs", type=int, default=1, help="epochs of Primus-Instruct (~100K rows, gated, 0=skip)")
 parser.add_argument("--primus-reasoning-epochs", type=int, default=1, help="epochs of Primus-Reasoning (~50K rows, gated, 0=skip)")
 parser.add_argument("--cybernative-vuln-epochs", type=int, default=2, help="epochs of CyberNative vuln DPO (~4.6K rows)")
@@ -331,6 +332,7 @@ elif not args.disable_cybersec_sft:
         mesosfer_validation_epochs=args.mesosfer_validation_epochs,
         gemini_teacher_epochs=args.gemini_teacher_epochs,
         chat_history_epochs=args.chat_history_epochs,
+        real_agentic_epochs=args.real_agentic_epochs,
         primus_instruct_epochs=args.primus_instruct_epochs,
         primus_reasoning_epochs=args.primus_reasoning_epochs,
         cybernative_vuln_epochs=args.cybernative_vuln_epochs,
