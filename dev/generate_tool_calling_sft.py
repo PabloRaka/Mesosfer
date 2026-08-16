@@ -148,6 +148,28 @@ CONVERSATIONAL_QA = [
         ),
     },
     {
+        "user": "Jelaskan apa itu framework MITRE ATT&CK secara sederhana.",
+        "assistant": (
+            "**MITRE ATT&CK (Adversarial Tactics, Techniques, and Common Knowledge)** adalah basis data dan taksonomi global yang mendokumentasikan taktik dan teknik serangan siber nyata yang digunakan oleh kelompok penyerang (*threat actors*).\n\n"
+            "Framework ini distrukturkan dalam dua pilar utama:\n"
+            "1. **Tactics (Tujuan Penyerang)**: Apa yang ingin dicapai penyerang pada tahap tertentu (misal: *Initial Access*, *Execution*, *Persistence*, *Privilege Escalation*, *Exfiltration*).\n"
+            "2. **Techniques (Cara yang Digunakan)**: Metode teknis spesifik untuk mencapai tujuan tersebut (misal: *Phishing*, *Command and Scripting Interpreter*, *Pass the Hash*).\n\n"
+            "ATT&CK digunakan oleh tim keamanan untuk memetakan pertahanan, merancang deteksi threat hunting, dan melakukan simulasi serangan (*adversary emulation*)."
+        ),
+    },
+    {
+        "user": "Apa perbedaan antara IDS dan IPS?",
+        "assistant": (
+            "Perbedaan mendasar antara **IDS (Intrusion Detection System)** dan **IPS (Intrusion Prevention System)**:\n\n"
+            "| Fitur | IDS (Detection) | IPS (Prevention) |\n"
+            "| :--- | :--- | :--- |\n"
+            "| **Posisi Jaringan** | Pasif (Out-of-band, menerima salinan traffic lewat SPAN/TAP) | Aktif / Inline (Traffic lewat langsung melaluinya) |\n"
+            "| **Tindakan** | Hanya mendeteksi dan mengirim *alert* | Mendeteksi dan **langsung memblokir/drop paket** secara real-time |\n"
+            "| **Dampak Latency** | Nol (tidak memperlambat traffic utama) | Ada sedikit latency karena proses inspeksi inline |\n"
+            "| **Risiko Operasional**| Tidak ada risiko memblokir traffic sah | Risiko *false positive* dapat mengganggu operasional bisnis |"
+        ),
+    },
+    {
         "user": "What is the difference between asymmetric and symmetric encryption?",
         "assistant": (
             "The fundamental difference between symmetric and asymmetric encryption is the key management:\n\n"
@@ -233,6 +255,28 @@ SUBAGENT_DELEGATION_EXAMPLES = [
             "- **Rekomendasi**: Tambahkan domain ini ke DNS sinkhole dan blokir seluruh koneksi egress dari jaringan internal menuju domain tersebut."
         ),
     },
+    {
+        "user": "Delegasikan ke subagent sysadmin untuk mengecek konfigurasi hardening kernel Linux.",
+        "thinking": "<thinking>\nPengguna meminta subagent sysadmin untuk mengevaluasi parameter sysctl kernel Linux. Saya akan memanggil subagent dengan role sysadmin.\n</thinking>\n",
+        "tool_name": "subagent",
+        "tool_args": {
+            "role": "sysadmin",
+            "task": "Audit parameter kernel Linux untuk mitigasi IP spoofing dan SYN flood."
+        },
+        "tool_output": json.dumps({
+            "subagent_id": "subagent-004",
+            "role": "sysadmin",
+            "status": "COMPLETED",
+            "findings": "Parameter kernel: net.ipv4.tcp_syncookies=1 (OK), net.ipv4.conf.all.rp_filter=1 (OK), net.ipv4.conf.all.accept_source_route=0 (OK)."
+        }, ensure_ascii=False),
+        "conclusion": (
+            "\n\n**Laporan Subagent (`sysadmin`):**\n"
+            "- **TCP Syncookies**: `Aktif` (Mitigasi SYN Flood ✅)\n"
+            "- **Reverse Path Filtering (RP Filter)**: `Aktif` (Mitigasi IP Spoofing ✅)\n"
+            "- **Source Route Acceptance**: `Dinonaktifkan` ✅\n\n"
+            "Konfigurasi dasar kernel sudah mengikuti best practice hardening."
+        ),
+    },
 ]
 
 
@@ -252,11 +296,11 @@ TERMINAL_TOOLS_EXAMPLES = [
             "- **Total Kapasitas**: `1.8 TB`\n"
             "- **Terpakai**: `420 GB` (25%)\n"
             "- **Tersedia**: `1.3 TB` (75%)\n"
-            "- **Status**: Kapasitas disk sangat sehat dan memiliki ruang yang cukup luas."
+            "- **Status**: Kapasitas disk sangat sehat dan memiliki ruang penyimpanan yang luas."
         ),
     },
     {
-        "user": "Cek penggunaan memory dan RAM di server.",
+        "user": "Cek penggunaan memory RAM di server.",
         "thinking": "<thinking>\nPengguna meminta informasi penggunaan RAM/memory. Saya akan menjalankan perintah `free -h` via terminal.\n</thinking>\n",
         "tool_name": "terminal",
         "tool_args": {"command": "free -h"},
@@ -267,7 +311,39 @@ TERMINAL_TOOLS_EXAMPLES = [
             "- **Terpakai (Used)**: `14 GB` (~11%)\n"
             "- **Tersedia (Available)**: `109 GB` (~87%)\n"
             "- **Swap**: `0 B` terpakai dari `8.0 GB`\n\n"
-            "Server beroperasi dengan sangat optimal tanpa adanya beban memory berlebih."
+            "Penggunaan RAM normal dan server beroperasi dengan sangat optimal."
+        ),
+    },
+    {
+        "user": "Cek port mana saja yang sedang listening di server ini.",
+        "thinking": "<thinking>\nPengguna meminta daftar port yang sedang listening. Saya akan menggunakan perintah standar Linux `ss -tulpn`.\n</thinking>\n",
+        "tool_name": "terminal",
+        "tool_args": {"command": "ss -tulpn"},
+        "tool_output": (
+            "Netid  State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process\n"
+            "tcp    LISTEN  0       128     0.0.0.0:22           0.0.0.0:*          users:((\"sshd\",pid=1024))\n"
+            "tcp    LISTEN  0       511     0.0.0.0:80           0.0.0.0:*          users:((\"nginx\",pid=1450))\n"
+            "tcp    LISTEN  0       511     0.0.0.0:443          0.0.0.0:*          users:((\"nginx\",pid=1450))\n"
+            "tcp    LISTEN  0       128     127.0.0.1:5432       0.0.0.0:*          users:((\"postgres\",pid=1820))"
+        ),
+        "conclusion": (
+            "\n\n**Daftar Port Listening di Server:**\n"
+            "- **Port 22 (SSH)**: Terbuka untuk remote administration (`0.0.0.0:22`)\n"
+            "- **Port 80 / 443 (HTTP/HTTPS)**: Nginx Web Server (`0.0.0.0:80`, `0.0.0.0:443`)\n"
+            "- **Port 5432 (PostgreSQL)**: Hanya mengikat ke `127.0.0.1` (localhost only) ✅ Aman, tidak terekspos ke publik."
+        ),
+    },
+    {
+        "user": "Periksa uptime server dan load average saat ini.",
+        "thinking": "<thinking>\nPengguna meminta uptime dan load average. Saya akan menjalankan perintah `uptime` di terminal.\n</thinking>\n",
+        "tool_name": "terminal",
+        "tool_args": {"command": "uptime"},
+        "tool_output": " 02:15:22 up 14 days,  6:42,  2 users,  load average: 0.12, 0.08, 0.05",
+        "conclusion": (
+            "\n\n**Status Uptime Server:**\n"
+            "- **Waktu Aktif**: `14 hari, 6 jam 42 menit`\n"
+            "- **User Aktif**: 2 pengguna\n"
+            "- **Load Average**: `0.12, 0.08, 0.05` (Sangat rendah dan stabil)"
         ),
     },
     {
@@ -280,25 +356,6 @@ TERMINAL_TOOLS_EXAMPLES = [
             "\n\n**Status Layanan:**\n"
             "- **Nginx Web Server**: `active` (berjalan normal) ✅\n"
             "- **UFW Firewall**: `active` (berjalan normal) ✅"
-        ),
-    },
-    {
-        "user": "Cek port mana saja yang sedang listening di server ini.",
-        "thinking": "<thinking>\nPengguna meminta daftar port listening. Saya akan menggunakan perintah `ss -tulpn`.\n</thinking>\n",
-        "tool_name": "terminal",
-        "tool_args": {"command": "ss -tulpn"},
-        "tool_output": (
-            "Netid  State   Recv-Q  Send-Q  Local Address:Port   Peer Address:Port  Process\n"
-            "tcp    LISTEN  0       128     0.0.0.0:22           0.0.0.0:*          users:((\"sshd\",pid=1024))\n"
-            "tcp    LISTEN  0       511     0.0.0.0:80           0.0.0.0:*          users:((\"nginx\",pid=1450))\n"
-            "tcp    LISTEN  0       511     0.0.0.0:443          0.0.0.0:*          users:((\"nginx\",pid=1450))\n"
-            "tcp    LISTEN  0       128     127.0.0.1:5432       0.0.0.0:*          users:((\"postgres\",pid=1820))"
-        ),
-        "conclusion": (
-            "\n\n**Port Listening pada Server:**\n"
-            "- **Port 22 (SSH)**: Terbuka untuk semua interface (`0.0.0.0:22`)\n"
-            "- **Port 80/443 (HTTP/HTTPS)**: Nginx Web Server (`0.0.0.0:80`, `0.0.0.0:443`)\n"
-            "- **Port 5432 (PostgreSQL)**: Hanya mengikat ke localhost (`127.0.0.1:5432`) ✅ Aman, tidak terekspos keluar."
         ),
     },
 ]
@@ -391,7 +448,7 @@ TOOL_REFUSAL = (
 def build_rows() -> list[list[dict]]:
     rows: list[list[dict]] = []
 
-    # 1. Conversational Q&A (multiply for strong representation)
+    # 1. Conversational Q&A
     for item in CONVERSATIONAL_QA:
         for prefix in ["", "Tolong ", "Permisi, ", ""]:
             user_text = prefix + item["user"] if prefix else item["user"]
