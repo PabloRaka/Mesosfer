@@ -376,7 +376,7 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--num-samples', type=int, default=1)
     parser.add_argument('-k', '--top-k', type=int, default=50)
     parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for categorical evaluation')
-    parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
+    parser.add_argument('-g', '--model-tag', '--depth', type=str, default=None, help='Model tag or depth to load (e.g. d12)')
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
     parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
     parser.add_argument('--domain-eval', type=int, default=0, help='1 = also run cyber/coding domain evals')
