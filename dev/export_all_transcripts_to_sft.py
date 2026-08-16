@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Scan all conversation history logs across the workspace, scrub any secrets/credentials,
-and distill them into a clean, safe, high-quality SFT dataset for Mesosfer.
+Scan all conversation history logs across the workspace, apply strict quality filters,
+remove noise/IDE leakage, and distill into a GOLD-STANDARD SFT dataset for Mesosfer.
 
-Topics:
-- System debugging, architecture & full-stack development
-- Python, Rust, Go, TypeScript, Shell scripting
-- Cybersecurity analysis, penetration testing concepts, SOC & SIEM
-- AI/ML model training, ROCm/CUDA tuning, KV Cache, Flash Attention
-- Linux systems administration and DevOps automation
+Strict Quality Filters:
+1. Strip ANSI escape sequences & terminal artifacts.
+2. Filter out agent internal thinking/planning monologues ("I will stage...", "Now update...").
+3. Filter out irrelevant side-projects (Turnitin scraper, SimKopDes village cooperatives).
+4. Filter out fragmented one-word prompts ("ANJUTIN", "ya kerjain").
+5. Ensure self-contained, professional, high-value Q&A (Python, Rust, Linux, Cybersec, ML, Networking).
 """
 
 from __future__ import annotations
@@ -25,29 +25,56 @@ DEFAULT_OUTPUT = REPO_ROOT / "data" / "sft" / "chat_history_distilled_sft.jsonl"
 
 
 # ---------------------------------------------------------------------------
-# Comprehensive Secret Scrubber
+# Blacklisted project keywords & noise indicators
 # ---------------------------------------------------------------------------
+
+BLACKLIST_KEYWORDS = [
+    "turnitin",
+    "simkopdes",
+    "koperasi desa",
+    "bear_step",
+    "bear_final",
+    "salah workspace",
+    "open folder",
+    "postman-mcp",
+    "dbviz.pikaa",
+    "shietoshi.xyz",
+    "bab siji",
+    "paper 22",
+    "contributor_role_id",
+]
+
+AGENT_PLANNING_PHRASES = [
+    r"^I will stage the changes.*",
+    r"^I will commit the staged.*",
+    r"^I will push the newly.*",
+    r"^Now update the summary table.*",
+    r"^Now I have a complete picture.*",
+    r"^Sekarang saya punya semua informasi yang diperlukan.*",
+    r"^Mari saya lihat dulu semua API.*",
+    r"^Sekarang saya buat workspace.*",
+]
+
+
+def clean_ansi(text: str) -> str:
+    """Remove ANSI escape sequences and malformed brackets."""
+    text = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+    text = re.sub(r"\[\[\d+m[A-Z\s]+\[\d+m\]", "", text)
+    text = re.sub(r"\[\d+m\]", "", text)
+    return text
+
 
 def scrub_secrets(text: str) -> str:
     """Scrub potential API keys, access tokens, and credentials."""
-    # Hugging Face tokens (hf_...)
     text = re.sub(r"hf_[A-Za-z0-9_]{20,}", "hf_REDACTED_HF_TOKEN", text)
-    # Postman API keys (PMAK-...)
     text = re.sub(r"PMAK-[A-Za-z0-9\-]{20,}", "PMAK-REDACTED_POSTMAN_KEY", text)
-    # Alibaba Cloud AccessKey (LTAI...)
     text = re.sub(r"LTAI[A-Za-z0-9]{12,30}", "LTAI_REDACTED_ACCESS_KEY", text)
-    # AWS AccessKey (AKIA...)
     text = re.sub(r"AKIA[0-9A-Z]{16}", "AKIA_REDACTED_AWS_KEY", text)
-    # GitHub Personal Access Token (ghp_..., gho_..., github_pat_...)
     text = re.sub(r"gh[pors]_[A-Za-z0-9_]{30,}", "ghp_REDACTED_GITHUB_TOKEN", text)
     text = re.sub(r"github_pat_[A-Za-z0-9_]{30,}", "github_pat_REDACTED_TOKEN", text)
-    # OpenAI / Anthropic / Generic API keys (sk-...)
     text = re.sub(r"sk-[A-Za-z0-9_\-]{20,}", "sk-REDACTED_API_KEY", text)
-    # Generic bearer tokens in headers
     text = re.sub(r"(Authorization:\s*Bearer\s+)[^\s\n\"']+", r"\1REDACTED_TOKEN", text, flags=re.IGNORECASE)
-    # Generic private key blocks
     text = re.sub(r"-----BEGIN (RSA|EC|OPENSSH|DSA|PRIVATE) KEY-----[\s\S]*?-----END \1 KEY-----", "----BEGIN PRIVATE KEY-----\n[REDACTED_KEY]\n-----END PRIVATE KEY-----", text)
-    # Generic password assignments
     text = re.sub(r"(password\s*[:=]\s*['\"])[^'\"]+(['\"])", r"\1REDACTED_PASSWORD\2", text, flags=re.IGNORECASE)
     return text
 
@@ -57,7 +84,7 @@ def clean_user_text(raw_text: str) -> str | None:
     if not raw_text or len(raw_text.strip()) < 8:
         return None
 
-    text = raw_text.strip()
+    text = clean_ansi(raw_text.strip())
 
     # Remove <ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>
     text = re.sub(r"<ADDITIONAL_METADATA>.*?</ADDITIONAL_METADATA>", "", text, flags=re.DOTALL).strip()
@@ -89,10 +116,24 @@ def clean_user_text(raw_text: str) -> str | None:
 
     # Filter out pure HTTP trace dumps / raw logs with no question
     if text.startswith("HTTP Request:") or (text.startswith("2026-") and "httpx" in text):
-        if len(text.splitlines()) > 5:
+        if len(text.splitlines()) > 4:
             return None
 
-    if len(text) < 5 or len(text) > 4000:
+    # Filter out KeyboardInterrupt dumps
+    if "KeyboardInterrupt" in text and len(text.splitlines()) > 5:
+        return None
+
+    # Filter out side-projects
+    text_lower = text.lower()
+    if any(k in text_lower for k in BLACKLIST_KEYWORDS):
+        return None
+
+    # Filter out fragmented commands / meaningless words
+    words = text.split()
+    if len(words) <= 2 and not any(k in text_lower for k in ["df -h", "free -h", "ss -tulpn", "siem", "soc", "xss", "sqli", "ram"]):
+        return None
+
+    if len(text) < 6 or len(text) > 3500:
         return None
 
     return scrub_secrets(text)
@@ -100,21 +141,32 @@ def clean_user_text(raw_text: str) -> str | None:
 
 def clean_assistant_text(raw_text: str) -> str | None:
     """Clean and filter assistant responses."""
-    if not raw_text or len(raw_text.strip()) < 30:
+    if not raw_text or len(raw_text.strip()) < 35:
         return None
 
-    text = raw_text.strip()
+    text = clean_ansi(raw_text.strip())
 
     # Remove tool execution artifacts / system banners
     text = re.sub(r"^Created At:.*?\n", "", text, flags=re.MULTILINE)
     text = re.sub(r"^Completed At:.*?\n", "", text, flags=re.MULTILINE)
     text = re.sub(r"\[diff_block_start\].*?\[diff_block_end\]", "", text, flags=re.DOTALL)
 
-    text = scrub_secrets(text.strip())
-    if len(text) < 30:
+    # Filter out agent planning monologues
+    for pattern in AGENT_PLANNING_PHRASES:
+        text = re.sub(pattern, "", text, flags=re.MULTILINE)
+
+    text = text.strip()
+    text_lower = text.lower()
+
+    # Filter out side-projects
+    if any(k in text_lower for k in BLACKLIST_KEYWORDS):
         return None
 
-    return text
+    # Discard if response is too short or dangling
+    if len(text) < 35 or text.endswith("Mari mulai:"):
+        return None
+
+    return scrub_secrets(text)
 
 
 def extract_pairs_from_transcript(tpath: Path) -> list[tuple[str, str]]:
@@ -199,7 +251,7 @@ def main() -> None:
         for conv in all_conversations:
             f.write(json.dumps(conv, ensure_ascii=False) + "\n")
 
-    print(f"Successfully processed and sanitized {len(all_conversations)} dialogue pairs into {args.output}")
+    print(f"Successfully processed {len(all_conversations)} GOLD-QUALITY dialogue pairs into {args.output}")
 
 
 if __name__ == "__main__":
