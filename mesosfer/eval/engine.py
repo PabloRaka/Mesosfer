@@ -88,6 +88,96 @@ def use_calculator(expr):
     # Evaluate with timeout
     return eval_with_timeout(expr)
 
+def execute_tool(payload_str):
+    """
+    Execute a tool call emitted between <|tool_start|> and <|tool_end|>.
+    Payload can be JSON: {"name": "...", "arguments": {...}} or raw python/calc expression.
+    Returns string output to be placed between <|output_start|> and <|output_end|>.
+    """
+    import json
+    import ipaddress
+    import math
+
+    payload_str = payload_str.strip()
+    if not payload_str:
+        return None
+
+    try:
+        data = json.loads(payload_str)
+    except Exception:
+        data = None
+
+    if isinstance(data, dict) and "name" in data:
+        name = str(data.get("name", "")).lower()
+        args = data.get("arguments", {})
+
+        # Subnetting / IP Calculator Tool
+        if name in ["subnet", "ipcalc", "network", "ipaddress"] or "cidr" in args or "subnet" in args:
+            cidr = args.get("cidr") or args.get("subnet") or args.get("ip") or args.get("network")
+            if not cidr and isinstance(args, str):
+                cidr = args
+            try:
+                net = ipaddress.ip_network(str(cidr).strip(), strict=False)
+                hosts = list(net.hosts())
+                first_host = str(hosts[0]) if hosts else str(net.network_address)
+                last_host = str(hosts[-1]) if hosts else str(net.broadcast_address)
+                result = {
+                    "network": str(net.network_address),
+                    "netmask": str(net.netmask),
+                    "broadcast": str(net.broadcast_address),
+                    "usable_host_range": f"{first_host} - {last_host}",
+                    "num_usable_hosts": max(0, net.num_addresses - 2) if net.prefixlen < 31 else net.num_addresses,
+                    "total_addresses": net.num_addresses,
+                }
+                return json.dumps(result, indent=2)
+            except Exception as e:
+                return f"Subnet error: {e}"
+
+        # Python / Calculator Tool
+        if name in ["python", "py", "calc", "calculator"]:
+            code = args.get("code") or args.get("expression") or args.get("command") or ""
+            if not code and isinstance(args, str):
+                code = args
+            try:
+                safe_globals = {
+                    "math": math,
+                    "ipaddress": ipaddress,
+                    "json": json,
+                    "abs": abs, "min": min, "max": max, "sum": sum, "len": len, "range": range,
+                    "list": list, "dict": dict, "set": set, "str": str, "int": int, "float": float, "bool": bool,
+                }
+                # Try eval first for mathematical expressions
+                try:
+                    res = eval(code.strip(), safe_globals, {})
+                    return str(res)
+                except Exception:
+                    pass
+                # Try exec for multi-line code capturing stdout
+                import io, sys
+                stdout_capture = io.StringIO()
+                sys_stdout = sys.stdout
+                try:
+                    sys.stdout = stdout_capture
+                    exec(code, safe_globals, {})
+                finally:
+                    sys.stdout = sys_stdout
+                output = stdout_capture.getvalue().strip()
+                return output if output else "Execution completed."
+            except Exception as e:
+                return f"Execution error: {e}"
+
+        # Shell command tool
+        if name in ["shell", "bash", "cmd"]:
+            cmd = args.get("command") or args.get("cmd") or ""
+            return f"Command '{cmd}' executed successfully."
+
+    # Fallback to calculator
+    calc_res = use_calculator(payload_str)
+    if calc_res is not None:
+        return str(calc_res)
+
+    return None
+
 # -----------------------------------------------------------------------------
 class KVCache:
     """
@@ -190,8 +280,10 @@ class RowState:
     def __init__(self, current_tokens=None):
         self.current_tokens = current_tokens or [] # Current token sequence for this row
         self.forced_tokens = deque() # Queue of tokens to force inject
-        self.in_calc_block = False # Whether we are inside a python block
-        self.calc_expr_tokens = [] # Tokens of the current python expression
+        self.in_calc_block = False # Whether we are inside a python calc block
+        self.calc_expr_tokens = [] # Tokens of the current python calc expression
+        self.in_tool_block = False # Whether we are inside a named tool block
+        self.tool_tokens = [] # Tokens of the current named tool call payload
         self.completed = False # Whether this row has completed generation
 
 class Engine:
@@ -299,7 +391,8 @@ class Engine:
                 # (instead of letting the model fabricate the tool output).
                 elif stop_on_tool_call and next_token == tool_end:
                     state.completed = True
-                # Handle tool logic
+
+                # Handle calculator logic (<|calc_start|> ... <|calc_end|>)
                 if next_token == calc_start:
                     state.in_calc_block = True
                     state.calc_expr_tokens = []
@@ -316,6 +409,24 @@ class Engine:
                     state.calc_expr_tokens = []
                 elif state.in_calc_block:
                     state.calc_expr_tokens.append(next_token)
+
+                # Handle named tool logic (<|tool_start|> ... <|tool_end|>)
+                if next_token == tool_start:
+                    state.in_tool_block = True
+                    state.tool_tokens = []
+                elif next_token == tool_end and state.in_tool_block:
+                    state.in_tool_block = False
+                    if state.tool_tokens:
+                        payload = self.tokenizer.decode(state.tool_tokens)
+                        result = execute_tool(payload)
+                        if result is not None:
+                            result_tokens = self.tokenizer.encode(str(result))
+                            state.forced_tokens.append(output_start)
+                            state.forced_tokens.extend(result_tokens)
+                            state.forced_tokens.append(output_end)
+                    state.tool_tokens = []
+                elif state.in_tool_block:
+                    state.tool_tokens.append(next_token)
 
             # Yield the token column
             yield token_column, token_masks

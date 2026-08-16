@@ -110,10 +110,27 @@ parser.add_argument("--tool-calling-epochs", type=int, default=8, help="epochs o
 parser.add_argument("--instruction-following-epochs", type=int, default=4, help="epochs of instruction_following_conversations_en.jsonl (format/count/conciseness polish)")
 parser.add_argument("--instruction-polish-only", action="store_true", help="train only on local identity/rules/instruction-following polish data")
 parser.add_argument("--safety-artifact-epochs", type=int, default=4, help="epochs of safety_artifact_conversations_en.jsonl (artifact-vs-attack boundary)")
-parser.add_argument("--safety-artifact-only", action="store_true", help="train only on local identity/rules/safety-artifact boundary data")
 parser.add_argument("--local-sft-only", action="store_true", help="train only on local SFT datasets (skip downloading SmolTalk, MMLU, GSM8K, and Spelling tasks)")
+parser.add_argument("--targeted-domain-sft", action="store_true", help="train specifically on cybersecurity, tool-use, code feedback, and CoT reasoning without generic chatter")
 parser.add_argument("--save-every", type=int, default=200, help="save intermediate checkpoint every N steps (-1 = only at end)")
 args = parser.parse_args()
+
+if args.targeted_domain_sft:
+    args.local_sft_only = True
+    args.ultrachat_epochs = 0
+    args.openhermes_epochs = 0
+    args.alpaca_indonesian_epochs = 0
+    args.cyber_defensive_epochs = 8
+    args.cloud_security_epochs = 8
+    args.mythos_epochs = 8
+    args.mythos_tool_calling_epochs = 8
+    args.tool_calling_epochs = 12
+    args.tool_oriented_epochs = 8
+    args.gemini_teacher_epochs = 6
+    args.rules_epochs = 8
+    args.instruction_following_epochs = 8
+    args.safety_artifact_epochs = 6
+
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
 
