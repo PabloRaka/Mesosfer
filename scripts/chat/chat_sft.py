@@ -89,6 +89,7 @@ parser.add_argument("--ultrachat-epochs", type=int, default=1, help="epochs of U
 parser.add_argument("--trendyol-cyber-epochs", type=int, default=1, help="epochs of Trendyol Cybersecurity Instruction (53K rows, 0=skip)")
 parser.add_argument("--tiamz-cybersec-epochs", type=int, default=2, help="epochs of Tiamz cybersecurity Q&A (12K rows)")
 parser.add_argument("--alpaca-indonesian-epochs", type=int, default=1, help="epochs of Alpaca Cleaned Indonesian instruction dataset (~52K rows, 0=skip)")
+parser.add_argument("--alpaca-gpt4-indonesian-epochs", type=int, default=1, help="epochs of Alpaca GPT-4 Indonesian dataset (~52K rows, 0=skip)")
 parser.add_argument("--magpie-reasoning-epochs", type=int, default=1, help="epochs of magpie_reasoning_sft (~50K rows, 0=skip)")
 parser.add_argument("--open-thoughts-epochs", type=int, default=1, help="epochs of open_thoughts_sft (~50K rows, 0=skip)")
 parser.add_argument("--hermes-func-calling-epochs", type=int, default=2, help="epochs of Hermes function calling (20K rows, ungated tool-calling)")
@@ -110,6 +111,7 @@ parser.add_argument("--instruction-following-epochs", type=int, default=4, help=
 parser.add_argument("--instruction-polish-only", action="store_true", help="train only on local identity/rules/instruction-following polish data")
 parser.add_argument("--safety-artifact-epochs", type=int, default=4, help="epochs of safety_artifact_conversations_en.jsonl (artifact-vs-attack boundary)")
 parser.add_argument("--safety-artifact-only", action="store_true", help="train only on local identity/rules/safety-artifact boundary data")
+parser.add_argument("--local-sft-only", action="store_true", help="train only on local SFT datasets (skip downloading SmolTalk, MMLU, GSM8K, and Spelling tasks)")
 parser.add_argument("--save-every", type=int, default=200, help="save intermediate checkpoint every N steps (-1 = only at end)")
 args = parser.parse_args()
 user_config = vars(args).copy()
@@ -237,6 +239,12 @@ if args.instruction_polish_only or args.safety_artifact_only:
     ]
     mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
     print0(f"{mode_name} mode: skipping broad SmolTalk/MMLU/GSM8K/spelling training tasks")
+elif args.local_sft_only:
+    train_tasks = [
+        CustomJSON(filepath=identity_conversations_filepath),
+        CustomJSON(filepath=identity_conversations_filepath),
+    ]
+    print0("Local SFT mode: training only on local SFT data mixture (skipping SmolTalk/MMLU/GSM8K/Spelling)")
 else:
     train_tasks = [
         SmolTalk(split="train"), # 460K rows of general conversations
@@ -304,6 +312,7 @@ elif not args.disable_cybersec_sft:
         trendyol_cyber_epochs=args.trendyol_cyber_epochs,
         tiamz_cybersec_epochs=args.tiamz_cybersec_epochs,
         alpaca_indonesian_epochs=args.alpaca_indonesian_epochs,
+        alpaca_gpt4_indonesian_epochs=args.alpaca_gpt4_indonesian_epochs,
         magpie_reasoning_epochs=args.magpie_reasoning_epochs,
         open_thoughts_epochs=args.open_thoughts_epochs,
         nist_cybersec_epochs=args.nist_cybersec_epochs,
@@ -321,12 +330,26 @@ else:
     print0("Cybersec SFT disabled via --disable-cybersec-sft")
 
 train_dataset = TaskMixture(train_tasks)
-print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs})")
-val_dataset = TaskMixture([
-    SmolTalk(split="test"), # 24K rows in test set
-    MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
-    GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
-]) # total: 24K + 5.2K + 0.42K ~= 29.6K rows
+if args.local_sft_only:
+    print0(f"Training mixture (local SFT): {len(train_dataset):,} rows")
+    val_tasks = []
+    val_id = os.path.join(sft_dir, "mesosfer_validation_conversations.jsonl")
+    val_en = os.path.join(sft_dir, "mesosfer_validation_conversations_en.jsonl")
+    if os.path.exists(val_id):
+        val_tasks.append(CustomJSON(filepath=val_id))
+    if os.path.exists(val_en):
+        val_tasks.append(CustomJSON(filepath=val_en))
+    if not val_tasks:
+        val_tasks.append(CustomJSON(filepath=identity_conversations_filepath))
+    val_dataset = TaskMixture(val_tasks)
+    print0(f"Validation mixture (local): {len(val_dataset):,} rows")
+else:
+    print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs})")
+    val_dataset = TaskMixture([
+        SmolTalk(split="test"), # 24K rows in test set
+        MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
+        GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
+    ]) # total: 24K + 5.2K + 0.42K ~= 29.6K rows
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A big problem is that we don't know the final num_iterations in advance. So we create
 # these two global variables and update them from within the data generator.

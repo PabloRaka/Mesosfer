@@ -8,6 +8,7 @@ import argparse
 import os
 import re
 import shutil
+import time
 import torch
 from mesosfer.utils.common import compute_init, autodetect_device_type
 from mesosfer.eval.engine import Engine
@@ -204,6 +205,7 @@ assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>")
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
+max_seq_len = meta.get("model_config", {}).get("sequence_len", 2048) if isinstance(meta, dict) else 2048
 
 if not args.prompt:
     print_welcome(meta)
@@ -312,8 +314,16 @@ while True:
         continue
 
     # Add User message to the conversation and history
+    user_tokens = tokenizer.encode(user_input)
+    input_tokens_count = len(user_tokens)
+    
+    # Calculate context before generation
+    curr_ctx = len(conversation_tokens) + input_tokens_count + 3 # + user_start, user_end, assistant_start
+    ctx_pct = (curr_ctx / max_seq_len) * 100
+    print(f"{C.gray}  ↳ Input: {C.bold}{C.cyan}{input_tokens_count}{C.reset}{C.gray} tokens │ Context: {curr_ctx:,}/{max_seq_len:,} ({ctx_pct:.1f}%){C.reset}")
+
     conversation_tokens.append(user_start)
-    conversation_tokens.extend(tokenizer.encode(user_input))
+    conversation_tokens.extend(user_tokens)
     conversation_tokens.append(user_end)
     chat_history.append({"role": "user", "content": user_input})
 
@@ -329,6 +339,7 @@ while True:
     response_text_list = []
     print_assistant_header()
     renderer = CodeBlockState()
+    t_start = time.time()
     try:
         for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
             token = token_column[0] # pop the batch dimension (num_samples=1)
@@ -342,6 +353,7 @@ while True:
         print(f"\n{C.orange}[Generation interrupted by user]{C.reset}")
     finally:
         print(renderer.flush(), end="", flush=True)
+    t_end = time.time()
     print_footer()
 
     # Accumulate full text for the chat history
@@ -353,6 +365,14 @@ while True:
     if not response_tokens or response_tokens[-1] != assistant_end:
         response_tokens.append(assistant_end)
     conversation_tokens.extend(response_tokens)
+
+    # Show output token stats
+    out_tokens_count = len(response_tokens)
+    elapsed = max(0.001, t_end - t_start)
+    tok_per_sec = out_tokens_count / elapsed
+    total_ctx = len(conversation_tokens)
+    total_pct = (total_ctx / max_seq_len) * 100
+    print(f"{C.gray}  ↳ Output: {C.bold}{C.cyan}{out_tokens_count}{C.reset}{C.gray} tokens ({tok_per_sec:.1f} tok/s) │ Total Context: {total_ctx:,}/{max_seq_len:,} ({total_pct:.1f}%){C.reset}\n")
 
     # In the prompt mode, we only want a single response and exit
     if args.prompt:
