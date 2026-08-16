@@ -13,6 +13,7 @@ import torch
 from mesosfer.utils.common import compute_init, autodetect_device_type
 from mesosfer.eval.engine import Engine
 from mesosfer.utils.checkpoint_manager import load_model
+from mesosfer.sandbox import Sandbox, get_default_sandbox
 
 DEFAULT_SYSTEM_PROMPT = (
     "[Instruksi Sistem: Identitas asisten adalah Mesosfer. "
@@ -31,9 +32,19 @@ parser.add_argument('-m', '--max-tokens', type=int, default=512, help='Maximum n
 parser.add_argument('--repetition-penalty', '--rep-penalty', type=float, default=1.1, help='Repetition penalty (default: 1.1)')
 parser.add_argument('--system-prompt', type=str, default=DEFAULT_SYSTEM_PROMPT, help='System prompt for Mesosfer persona')
 parser.add_argument('--no-system-prompt', action='store_true', help='Disable system prompt')
+parser.add_argument('--sandbox-docker', action='store_true', help='Use isolated Docker container for sandbox execution')
+parser.add_argument('--sandbox-dir', type=str, default=None, help='Custom workspace directory for sandbox execution')
 parser.add_argument('--plain', action='store_true', help='Disable styled terminal UI')
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
 args = parser.parse_args()
+
+# Configure Sandbox environment
+sandbox = get_default_sandbox()
+if args.sandbox_dir:
+    sandbox.workspace_dir = args.sandbox_dir
+    os.makedirs(sandbox.workspace_dir, exist_ok=True)
+if args.sandbox_docker:
+    sandbox.use_docker = True
 
 if args.no_system_prompt:
     active_system_prompt = ""
@@ -180,6 +191,7 @@ def print_welcome(meta):
         f"layers    : {depth} · embd: {embd}",
         f"sampler   : temp: {args.temperature} · rep-pen: {args.repetition_penalty}",
         f"system    : {'Mesosfer Persona' if active_system_prompt else 'None'}",
+        f"sandbox   : {'Docker' if sandbox.use_docker else 'Local'} ({sandbox.workspace_dir})",
     ]
     boxed(" Mesosfer Chat CLI ", left, right)
     print(f"{C.gray}? for shortcuts · Ctrl+C or /exit to quit{C.reset}")
@@ -263,6 +275,7 @@ while True:
 
     if user_input.lower() in ['help', '/help', '?']:
         print_console("Commands: /clear, /system [prompt], /save [name.md], /temperature <0-2>, /topk <1-200>, /rep <1.0-2.0>, /maxtokens <1-4096>, /exit")
+        print_console("Sandbox:  /run <python code>, /bash <command>, /subnet <cidr>, /sandbox [status|dir <path>]")
         print_console("Multi-line: End a line with '\\' to write the next line.")
         print_console("Ctrl+C during generation will stop the response stream safely.")
         continue
@@ -363,6 +376,68 @@ while True:
                 print_console(f"Max tokens set to {args.max_tokens}")
             except ValueError:
                 print_console("Invalid max tokens.")
+        continue
+
+    # Sandbox slash commands: /run, /bash, /subnet, /sandbox
+    if user_input.lower().startswith(('/run ', '/python ', '/py ')):
+        code = user_input.split(maxsplit=1)[1] if len(user_input.split(maxsplit=1)) > 1 else ""
+        if code:
+            print_console(f"{C.gray}Running Python in sandbox...{C.reset}")
+            res = sandbox.execute_python(code)
+            if res["success"]:
+                if res["stdout"]:
+                    print(f"{C.green}{res['stdout']}{C.reset}")
+                else:
+                    print_console(f"{C.gray}(no output){C.reset}")
+            else:
+                print(f"{C.orange}Error ({res['returncode']}):{C.reset}\n{res['stderr']}")
+            print_console(f"{C.gray}{res['duration_sec']}s{C.reset}")
+        else:
+            print_console("Usage: /run <python code>")
+        continue
+
+    if user_input.lower().startswith(('/bash ', '/shell ', '/cmd ')):
+        command = user_input.split(maxsplit=1)[1] if len(user_input.split(maxsplit=1)) > 1 else ""
+        if command:
+            print_console(f"{C.gray}Running command in sandbox...{C.reset}")
+            res = sandbox.execute_bash(command)
+            if res["success"]:
+                if res["stdout"]:
+                    print(f"{C.green}{res['stdout']}{C.reset}")
+                else:
+                    print_console(f"{C.gray}(no output){C.reset}")
+            else:
+                print(f"{C.orange}Error ({res['returncode']}):{C.reset}\n{res['stderr']}")
+            print_console(f"{C.gray}{res['duration_sec']}s{C.reset}")
+        else:
+            print_console("Usage: /bash <command>")
+        continue
+
+    if user_input.lower().startswith('/subnet'):
+        parts = user_input.split(maxsplit=1)
+        if len(parts) > 1:
+            import json as _json
+            res = sandbox.execute_subnet(parts[1].strip())
+            print(f"{C.green}{_json.dumps(res, indent=2)}{C.reset}")
+        else:
+            print_console("Usage: /subnet <cidr> (e.g. /subnet 192.168.10.0/26)")
+        continue
+
+    if user_input.lower().startswith('/sandbox'):
+        parts = user_input.split()
+        if len(parts) == 1 or parts[1] == 'status':
+            mode = 'Docker' if sandbox.use_docker else 'Local subprocess'
+            print_console(f"Sandbox mode: {C.bold}{mode}{C.reset}")
+            print_console(f"Workspace: {C.bold}{sandbox.workspace_dir}{C.reset}")
+        elif parts[1] == 'dir' and len(parts) > 2:
+            sandbox.workspace_dir = parts[2]
+            os.makedirs(sandbox.workspace_dir, exist_ok=True)
+            print_console(f"Sandbox workspace set to {C.bold}{sandbox.workspace_dir}{C.reset}")
+        elif parts[1] == 'docker':
+            sandbox.use_docker = not sandbox.use_docker
+            print_console(f"Docker sandbox {'enabled' if sandbox.use_docker else 'disabled'}")
+        else:
+            print_console("Usage: /sandbox [status|dir <path>|docker]")
         continue
 
     if not user_input:

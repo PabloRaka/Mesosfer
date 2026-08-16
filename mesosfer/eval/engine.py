@@ -95,8 +95,7 @@ def execute_tool(payload_str):
     Returns string output to be placed between <|output_start|> and <|output_end|>.
     """
     import json
-    import ipaddress
-    import math
+    from mesosfer.sandbox.runner import get_default_sandbox
 
     payload_str = payload_str.strip()
     if not payload_str:
@@ -107,74 +106,21 @@ def execute_tool(payload_str):
     except Exception:
         data = None
 
+    sandbox = get_default_sandbox()
+
     if isinstance(data, dict) and "name" in data:
-        name = str(data.get("name", "")).lower()
+        name = str(data.get("name", ""))
         args = data.get("arguments", {})
+        return sandbox.run_tool_call(name, args)
 
-        # Subnetting / IP Calculator Tool
-        if name in ["subnet", "ipcalc", "network", "ipaddress"] or "cidr" in args or "subnet" in args:
-            cidr = args.get("cidr") or args.get("subnet") or args.get("ip") or args.get("network")
-            if not cidr and isinstance(args, str):
-                cidr = args
-            try:
-                net = ipaddress.ip_network(str(cidr).strip(), strict=False)
-                hosts = list(net.hosts())
-                first_host = str(hosts[0]) if hosts else str(net.network_address)
-                last_host = str(hosts[-1]) if hosts else str(net.broadcast_address)
-                result = {
-                    "network": str(net.network_address),
-                    "netmask": str(net.netmask),
-                    "broadcast": str(net.broadcast_address),
-                    "usable_host_range": f"{first_host} - {last_host}",
-                    "num_usable_hosts": max(0, net.num_addresses - 2) if net.prefixlen < 31 else net.num_addresses,
-                    "total_addresses": net.num_addresses,
-                }
-                return json.dumps(result, indent=2)
-            except Exception as e:
-                return f"Subnet error: {e}"
-
-        # Python / Calculator Tool
-        if name in ["python", "py", "calc", "calculator"]:
-            code = args.get("code") or args.get("expression") or args.get("command") or ""
-            if not code and isinstance(args, str):
-                code = args
-            try:
-                safe_globals = {
-                    "math": math,
-                    "ipaddress": ipaddress,
-                    "json": json,
-                    "abs": abs, "min": min, "max": max, "sum": sum, "len": len, "range": range,
-                    "list": list, "dict": dict, "set": set, "str": str, "int": int, "float": float, "bool": bool,
-                }
-                # Try eval first for mathematical expressions
-                try:
-                    res = eval(code.strip(), safe_globals, {})
-                    return str(res)
-                except Exception:
-                    pass
-                # Try exec for multi-line code capturing stdout
-                import io, sys
-                stdout_capture = io.StringIO()
-                sys_stdout = sys.stdout
-                try:
-                    sys.stdout = stdout_capture
-                    exec(code, safe_globals, {})
-                finally:
-                    sys.stdout = sys_stdout
-                output = stdout_capture.getvalue().strip()
-                return output if output else "Execution completed."
-            except Exception as e:
-                return f"Execution error: {e}"
-
-        # Shell command tool
-        if name in ["shell", "bash", "cmd"]:
-            cmd = args.get("command") or args.get("cmd") or ""
-            return f"Command '{cmd}' executed successfully."
-
-    # Fallback to calculator
+    # Fallback to calculator or python execution
     calc_res = use_calculator(payload_str)
     if calc_res is not None:
         return str(calc_res)
+
+    res = sandbox.execute_python(payload_str)
+    if res["success"] and res["stdout"]:
+        return res["stdout"]
 
     return None
 
