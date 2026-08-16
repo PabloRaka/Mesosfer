@@ -16,12 +16,12 @@ from mesosfer.utils.checkpoint_manager import load_model
 
 parser = argparse.ArgumentParser(description='Chat with the model')
 parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|rl")
-parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
+parser.add_argument('-g', '--model-tag', '--depth', type=str, default=None, help='Model tag or depth to load (e.g. d12)')
 parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
 parser.add_argument('-p', '--prompt', type=str, default='', help='Prompt the model, get a single response back')
 parser.add_argument('-t', '--temperature', type=float, default=0.6, help='Temperature for generation')
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Top-k sampling parameter')
-parser.add_argument('-m', '--max-tokens', type=int, default=256, help='Maximum new tokens per response')
+parser.add_argument('-m', '--max-tokens', type=int, default=512, help='Maximum new tokens per response (default: 512)')
 parser.add_argument('--plain', action='store_true', help='Disable styled terminal UI')
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
 args = parser.parse_args()
@@ -248,7 +248,7 @@ while True:
         continue
 
     if user_input.lower() in ['help', '/help', '?']:
-        print_console("Commands: /clear, /save [name.md], /temperature <0-2>, /topk <1-200>, /exit")
+        print_console("Commands: /clear, /save [name.md], /temperature <0-2>, /topk <1-200>, /maxtokens <1-4096>, /exit")
         print_console("Multi-line: End a line with '\\' to write the next line.")
         print_console("Ctrl+C during generation will stop the response stream safely.")
         continue
@@ -308,6 +308,18 @@ while True:
                 print_console(f"Top-k set to {args.top_k}")
             except ValueError:
                 print_console("Invalid top-k.")
+        continue
+
+    if user_input.lower().startswith(('/maxtokens', '/max_tokens', '/max-tokens')):
+        parts = user_input.split()
+        if len(parts) == 1:
+            print_console(f"Max tokens: {args.max_tokens}")
+        else:
+            try:
+                args.max_tokens = max(16, min(max_seq_len, int(parts[1])))
+                print_console(f"Max tokens set to {args.max_tokens}")
+            except ValueError:
+                print_console("Invalid max tokens.")
         continue
 
     if not user_input:
