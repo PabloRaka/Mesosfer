@@ -3,7 +3,10 @@ name = "mesosfer"
 version = "0.1.0"
 description = "the minimal full-stack ChatGPT clone"
 readme = "README.md"
-requires-python = ">=3.12"
+# Upper bound is deliberate: uv solves every Python version in this range, and the
+# ROCm/CUDA wheel indexes have no 3.14+ builds yet, so leaving it open makes
+# `uv sync --extra rocm` fail on a split that nobody actually installs into.
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "datasets>=4.0.0",
     "fastapi>=0.117.1",
@@ -35,19 +38,33 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 
-# torch index sources: CUDA 12.8, ROCm 6.4 WHL, or CPU
-# For ROCm 7.0 pre-built images (PyTorch 2.6.0 pre-installed):
-#   uv sync --extra rocm --no-build-isolation
-# The rocm index below is only used when NOT on a pre-built image.
+# torch index sources: CUDA 12.8, ROCm 7.2, or CPU.
+# The ROCm index must match the driver on the host (check with `ls -d /opt/rocm-*`).
+# ROCm wheels bundle their own runtime, so a 7.2 wheel is the right pick for any
+# ROCm 7.x driver; older 6.x hosts should point this URL back at whl/rocm6.4.
+# On images that already ship PyTorch at system level, create the venv with
+# `uv venv --system-site-packages` so it is reused instead of downloaded again.
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "cuda" },
     { index = "pytorch-cu128", extra = "gpu" },
-    { index = "pytorch-rocm64", extra = "rocm" },
+    { index = "pytorch-rocm", extra = "rocm" },
 ]
+# torch renamed its ROCm triton dependency at 2.11: <=2.10 pulls pytorch-triton-rocm
+# (index stops at 3.5.1), >=2.11 pulls triton-rocm (3.6.0+). Both names are mapped so
+# either torch generation resolves; the index is explicit=true, so an unmapped name
+# fails with "no version of triton-rocm" instead of falling back to PyPI.
+#
+# triton-rocm carries extra = "rocm" because it is a direct dependency of that extra
+# (see the comment there). pytorch-triton-rocm stays extra-less: it is only relevant to
+# ROCm 6.x hosts that repoint the index, and uv rejects an extra on a package that is
+# not listed under that extra.
 pytorch-triton-rocm = [
-    { index = "pytorch-rocm64", extra = "rocm" },
+    { index = "pytorch-rocm" },
+]
+triton-rocm = [
+    { index = "pytorch-rocm", extra = "rocm" },
 ]
 
 [[tool.uv.index]]
@@ -61,8 +78,8 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [[tool.uv.index]]
-name = "pytorch-rocm64"
-url = "https://download.pytorch.org/whl/rocm6.4"
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
 
 [project.optional-dependencies]
@@ -78,7 +95,12 @@ gpu = [
 ]
 rocm = [
     "torch>=2.6.0,<3.0",
-    "pytorch-triton-rocm>=3.1.0",
+    # Must be listed explicitly, not left to torch. [tool.uv.sources] is only consulted
+    # for the project's *direct* dependencies, so as a transitive dep of torch this name
+    # never reaches the ROCm index (which is explicit=true) and resolution dies with
+    # "no version of triton-rocm==3.6.0". Naming it here makes the mapping apply.
+    # torch >=2.11 requires this name; on a ROCm 6.x index it is pytorch-triton-rocm instead.
+    "triton-rocm>=3.6.0 ; sys_platform == 'linux'",
 ]
 
 [tool.uv]

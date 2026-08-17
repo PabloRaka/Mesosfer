@@ -47,7 +47,7 @@ def test_no_unused_dead_special_tokens():
         "<|bos|>",
         "<|user_start|>", "<|user_end|>",
         "<|assistant_start|>", "<|assistant_end|>",
-        "<|python_start|>", "<|python_end|>",
+        "<|calc_start|>", "<|calc_end|>",
         "<|output_start|>", "<|output_end|>",
         "<|tool_start|>", "<|tool_end|>",
     }

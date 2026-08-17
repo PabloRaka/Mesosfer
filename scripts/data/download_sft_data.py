@@ -12,6 +12,7 @@ Usage:
 """
 
 import os
+import re
 import json
 import argparse
 import logging
@@ -155,17 +156,22 @@ SOURCES = {
         "gated": False,
     },
     # -------------------------------------------------------------------------
-    # Competition Math SFT — step-by-step math reasoning
-    # HF Link: https://huggingface.co/datasets/hendrycks/competition_math
-    "competition_math_sft": {
-        "hf_name": "hendrycks/competition_math",
+    # Alpaca GPT-4 Indonesian — ~52K high-quality GPT-4 translated instruction rows
+    # HF Link: https://huggingface.co/datasets/FreedomIntelligence/alpaca-gpt4-indonesian
+    "alpaca_gpt4_indonesian": {
+        "hf_name": "FreedomIntelligence/alpaca-gpt4-indonesian",
         "split": "train",
-        "streaming": True,
-        "format": "instruction_answer",
-        "output_file": "competition_math_sft.jsonl",
-        "max_rows": 10_000,
+        "streaming": False,
+        "format": "messages",
+        "output_file": "alpaca_gpt4_indonesian_sft.jsonl",
+        "max_rows": 52_000,
         "gated": False,
     },
+    # -------------------------------------------------------------------------
+    # NOTE: competition_math_sft (hendrycks/competition_math) was removed — the repo no
+    # longer exists on the Hub (DatasetNotFoundError, not a permission problem). It was
+    # redundant anyway: numinamath_cot supplies competition-level maths with explicit
+    # chain-of-thought, which the instruction_answer converter here could not produce.
     # -------------------------------------------------------------------------
     # Magpie Reasoning V2 — 250K high-quality reasoning pairs from DeepSeek-R1-Llama
     # HF Link: https://huggingface.co/datasets/Magpie-Align/Magpie-Reasoning-V2-250K-CoT-Deepseek-R1-Llama-70B
@@ -271,6 +277,80 @@ SOURCES = {
         "max_rows": 20_000,
         "gated": True,
     },
+    # -------------------------------------------------------------------------
+    # Hermes function-calling — multi-turn tool use, ungated (Apache-2.0).
+    # This is the ungated counterpart to xlam: without HF_TOKEN it is the only
+    # external tool-calling data available. Tool calls arrive in <tool_call> XML
+    # tags and are converted to native tool / tool_output parts.
+    # HF Link: https://huggingface.co/datasets/NousResearch/hermes-function-calling-v1
+    "hermes_func_calling": {
+        "hf_name": "NousResearch/hermes-function-calling-v1",
+        "hf_subset": "func_calling",
+        "split": "train",
+        "streaming": True,
+        "format": "sharegpt_tool_calls",
+        "output_file": "hermes_func_calling_sft.jsonl",
+        "max_rows": 20_000,
+        "gated": False,
+    },
+    # Glaive function-calling, already cleaned into ShareGPT turns by Nous. Preferred
+    # over glaiveai/glaive-function-calling-v2 itself, which ships one raw text blob
+    # per row (USER:/ASSISTANT:/<functioncall>) that needs brittle string parsing.
+    "hermes_glaive_func_calling": {
+        "hf_name": "NousResearch/hermes-function-calling-v1",
+        "hf_subset": "glaive_func_calling",
+        "split": "train",
+        "streaming": True,
+        "format": "sharegpt_tool_calls",
+        "output_file": "hermes_glaive_func_calling_sft.jsonl",
+        "max_rows": 20_000,
+        "gated": False,
+    },
+    # -------------------------------------------------------------------------
+    # Kimi K3 coding/debugging traces — agentic multi-step tool use with reasoning.
+    # Small (~4K) but rare: real trajectories rather than single-shot calls.
+    # HF Link: https://huggingface.co/datasets/greghavens/kimi-k3-coding-and-debugging-traces
+    "kimi_k3_traces": {
+        "hf_name": "greghavens/kimi-k3-coding-and-debugging-traces",
+        "split": "train",
+        "streaming": True,
+        "format": "openai_tool_calls",
+        "output_file": "kimi_k3_traces_sft.jsonl",
+        "max_rows": 5_000,
+        "gated": False,
+    },
+    # -------------------------------------------------------------------------
+    # CoT Collection — 1.8M chain-of-thought rationales across many NLP tasks.
+    # The repo only contains a loading script, so we read the Hub's auto-converted
+    # parquet via revision=refs/convert/parquet (trust_remote_code stays False).
+    # HF Link: https://huggingface.co/datasets/kaist-ai/CoT-Collection
+    "cot_collection": {
+        "hf_name": "kaist-ai/CoT-Collection",
+        # The auto-converted parquet branch names its single config "default"; asking for
+        # the upstream config name ("en") raises BuilderConfig 'en' not found and the
+        # source silently yields zero rows.
+        "hf_subset": "default",
+        "revision": "refs/convert/parquet",
+        "split": "train",
+        "streaming": True,
+        "format": "reasoning_trace",
+        "output_file": "cot_collection_sft.jsonl",
+        "max_rows": 50_000,
+        "gated": False,
+    },
+    # -------------------------------------------------------------------------
+    # Reasoning corpus distilled from several frontier models. Already carries an
+    # explicit thought_trace column, so it needs no thinking-tag parsing.
+    # HF Link: https://huggingface.co/datasets/Qyrou/reasoning-corpus-4K-5M-v1
+    "qyrou_reasoning": {
+        "hf_name": "Qyrou/reasoning-corpus-4K-5M-v1",
+        "split": "train",
+        "streaming": True,
+        "format": "reasoning_trace",
+        "output_file": "qyrou_reasoning_sft.jsonl",
+        "max_rows": 50_000,
+        "gated": False,
+    },
 }
 
 # =============================================================================
@@ -343,12 +423,6 @@ def convert_dpo_to_sft(row) -> list | None:
         {"role": "user", "content": prompt.strip()},
         {"role": "assistant", "content": chosen.strip()},
     ]
-
-
-CONVERTERS = {
-    "messages": convert_messages_format,
-    "dpo_to_sft": convert_dpo_to_sft,
-}
 
 
 def convert_system_user_assistant(row) -> list | None:
@@ -495,6 +569,185 @@ def convert_aquilax_reasoning(row) -> list | None:
     return _convert_messages(cleaned_raw)
 
 
+_REASONING_FIELDS = (
+    # (prompt, reasoning, answer) candidates, tried in order
+    ("source", "rationale", "target"),      # kaist-ai/CoT-Collection
+    ("user", "thought_trace", "assistant"), # Qyrou/reasoning-corpus
+    ("question", "reasoning", "answer"),
+    ("instruction", "thinking", "output"),
+)
+
+
+def convert_reasoning_trace(row) -> list | None:
+    """Chain-of-thought datasets that keep prompt, reasoning and answer in separate columns.
+
+    The reasoning and the final answer are concatenated into one assistant turn so the
+    model learns to reason before answering. Rows missing the reasoning field still
+    convert (prompt -> answer), rows missing prompt or answer are dropped.
+    """
+    for p_key, r_key, a_key in _REASONING_FIELDS:
+        prompt, answer = row.get(p_key), row.get(a_key)
+        if not isinstance(prompt, str) or not isinstance(answer, str):
+            continue
+        prompt, answer = prompt.strip(), answer.strip()
+        if not prompt or not answer:
+            continue
+        reasoning = row.get(r_key)
+        reasoning = reasoning.strip() if isinstance(reasoning, str) else ""
+        content = f"{reasoning}\n\n{answer}" if reasoning else answer
+        return [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": content},
+        ]
+    return None
+
+
+# <tool_call>{"name": ..., "arguments": {...}}</tool_call> as used by Hermes / Qwen / GLM
+_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.S)
+_TOOL_RESPONSE_TAG = re.compile(r"</?tool_response>", re.I)
+
+
+def _tool_part(payload: str) -> dict | None:
+    """Validate a tool-call payload against what mesosfer.eval.harness.parse_tool_call accepts."""
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("name"), str):
+        return None
+    args = obj.get("arguments", {})
+    if not isinstance(args, dict):
+        return None
+    return {"type": "tool", "text": json.dumps({"name": obj["name"], "arguments": args}, ensure_ascii=False)}
+
+
+def _flush(parts, messages):
+    """Append accumulated assistant parts as one assistant turn."""
+    if parts:
+        messages.append({"role": "assistant", "content": parts if len(parts) > 1 or parts[0]["type"] != "text"
+                                                     else parts[0]["text"]})
+
+
+def convert_sharegpt_tool_calls(row) -> list | None:
+    """ShareGPT-style rows whose tool calls sit in <tool_call> XML tags.
+
+    Source schema (NousResearch/hermes-function-calling-v1): ``conversations`` is a list of
+    {"from": system|human|gpt|tool, "value": str}. The system turn holds the tool definitions
+    and is folded into the first user turn (the tokenizer merges system messages anyway).
+    Consecutive gpt/tool turns collapse into a single assistant turn made of text / tool /
+    tool_output parts, which is the shape render_conversation expects.
+    """
+    convs = row.get("conversations")
+    if not isinstance(convs, list) or not convs:
+        return None
+
+    messages, parts, pending_system = [], [], ""
+    for turn in convs:
+        if not isinstance(turn, dict):
+            return None
+        role = turn.get("from") or turn.get("role")
+        value = turn.get("value") or turn.get("content")
+        if not isinstance(value, str):
+            continue
+        if role == "system":
+            pending_system = value.strip()
+        elif role in ("human", "user"):
+            _flush(parts, messages); parts = []
+            text = value.strip()
+            if pending_system:
+                text = f"{pending_system}\n\n{text}"
+                pending_system = ""
+            messages.append({"role": "user", "content": text})
+        elif role in ("gpt", "assistant"):
+            last = 0
+            for m in _TOOL_CALL_TAG.finditer(value):
+                pre = value[last:m.start()].strip()
+                if pre:
+                    parts.append({"type": "text", "text": pre})
+                part = _tool_part(m.group(1))
+                if part is None:
+                    return None
+                parts.append(part)
+                last = m.end()
+            tail = value[last:].strip()
+            if tail:
+                parts.append({"type": "text", "text": tail})
+        elif role in ("tool", "observation"):
+            if not parts:
+                return None
+            parts.append({"type": "tool_output", "text": _TOOL_RESPONSE_TAG.sub("", value).strip()})
+        else:
+            return None
+    _flush(parts, messages)
+
+    # must alternate user/assistant starting with user
+    if len(messages) < 2 or messages[0]["role"] != "user":
+        return None
+    for i, m in enumerate(messages):
+        if m["role"] != ("user" if i % 2 == 0 else "assistant"):
+            return None
+    return messages
+
+
+def convert_openai_tool_calls(row) -> list | None:
+    """Rows with OpenAI-style ``messages`` carrying a ``tool_calls`` list.
+
+    Source schema (greghavens/kimi-k3-coding-and-debugging-traces): messages are
+    {"role": user|assistant|tool, "content": str, "reasoning_content": str,
+     "tool_calls": [{"function": {"name", "arguments"}}], "tool_call_id": str}.
+    ``arguments`` arrives as a JSON *string*, which parse_tool_call would reject, so it is
+    decoded to a dict here. reasoning_content is kept as a leading text part.
+    """
+    msgs = row.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return None
+
+    out, parts = [], []
+    for m in msgs:
+        if not isinstance(m, dict):
+            return None
+        role, content = m.get("role"), m.get("content")
+        if role == "system":
+            continue
+        if role == "user":
+            _flush(parts, out); parts = []
+            if not isinstance(content, str) or not content.strip():
+                return None
+            out.append({"role": "user", "content": content.strip()})
+        elif role == "assistant":
+            reasoning = m.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                parts.append({"type": "text", "text": reasoning.strip()})
+            if isinstance(content, str) and content.strip():
+                parts.append({"type": "text", "text": content.strip()})
+            for call in m.get("tool_calls") or []:
+                fn = (call or {}).get("function") or {}
+                args = fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        return None
+                if not isinstance(fn.get("name"), str) or not isinstance(args, dict):
+                    return None
+                parts.append({"type": "tool",
+                              "text": json.dumps({"name": fn["name"], "arguments": args}, ensure_ascii=False)})
+        elif role == "tool":
+            if not parts or not isinstance(content, str):
+                return None
+            parts.append({"type": "tool_output", "text": content.strip()})
+        else:
+            return None
+    _flush(parts, out)
+
+    if len(out) < 2 or out[0]["role"] != "user":
+        return None
+    for i, m in enumerate(out):
+        if m["role"] != ("user" if i % 2 == 0 else "assistant"):
+            return None
+    return out
+
+
 CONVERTERS = {
     "messages": convert_messages_format,
     "dpo_to_sft": convert_dpo_to_sft,
@@ -504,6 +757,9 @@ CONVERTERS = {
     "auto": convert_auto,
     "aquilax_reasoning": convert_aquilax_reasoning,
     "function_calling": convert_function_calling,
+    "reasoning_trace": convert_reasoning_trace,
+    "sharegpt_tool_calls": convert_sharegpt_tool_calls,
+    "openai_tool_calls": convert_openai_tool_calls,
 }
 
 # =============================================================================
@@ -552,6 +808,11 @@ def download_source(name: str, config: dict, hf_token: str | None = None, sample
         load_kwargs["token"] = hf_token
     if config.get("hf_subset"):
         load_kwargs["name"] = config["hf_subset"]
+    # Some repos ship only a loading script, which datasets>=3 refuses to run with
+    # trust_remote_code=False. Pointing at refs/convert/parquet uses the Hub's
+    # auto-converted parquet instead.
+    if config.get("revision"):
+        load_kwargs["revision"] = config["revision"]
     if config.get("data_files"):
         load_kwargs["data_files"] = config["data_files"]
 
@@ -621,15 +882,15 @@ def main():
         print("\nAvailable SFT sources:")
         for name, cfg in SOURCES.items():
             gated = " [GATED - needs HF_TOKEN]" if cfg.get("gated") else ""
-            print(f"  {name:<25} → {cfg['output_file']}{gated}")
+            print(f"  {name:<25} -> {cfg['output_file']}{gated}")
         return
 
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if hf_token and hf_token != "your_hugging_face_token_here":
-        logger.info("✓ HF token found")
+        logger.info("[OK] HF token found")
     else:
         hf_token = None
-        logger.warning("⚠ No HF token — gated datasets will be skipped")
+        logger.warning("[!] No HF token - gated datasets will be skipped")
 
     global SFT_DIR
     if args.sample_10k:

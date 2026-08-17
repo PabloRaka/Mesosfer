@@ -31,7 +31,7 @@ Usage:
 
     # Upload from a custom dir under ~/.cache/mesosfer/
     python scripts/upload_checkpoint_to_hf.py --artifact dataset \\
-        --dataset-name base_data_cybersecurity
+        --dataset-dirs base_data_cybersecurity
 
 Checkpoint sources:
     base  → ~/.cache/mesosfer/base_checkpoints/<depth>/
@@ -512,23 +512,32 @@ def upload_dataset(api, base_dir: str, repo: str, dataset_names: list[str] | Non
         repo_prefix = f"{dir_name}"
         info(f"\n  [{dir_name}]  {len(parquets)} shard(s) → {repo}/{dir_name}/")
 
-        uploaded = skipped = 0
-        for i, filepath in enumerate(parquets, 1):
-            repo_path = f"{repo_prefix}/{filepath.name}"
-            if repo_path in existing_in_repo or f"dataset/{repo_path}" in existing_in_repo:
-                info(f"    [{i}/{len(parquets)}] SKIP {filepath.name} (already in repo)")
-                skipped += 1
-                continue
-            size_mb = filepath.stat().st_size / (1024 * 1024)
-            info(f"    [{i}/{len(parquets)}] Uploading {filepath.name} ({size_mb:.1f} MB)…")
-            api.upload_file(
-                path_or_fileobj=str(filepath),
-                path_in_repo=repo_path,
+        pending = [
+            p for p in parquets
+            if f"{repo_prefix}/{p.name}" not in existing_in_repo
+            and f"dataset/{repo_prefix}/{p.name}" not in existing_in_repo
+        ]
+        skipped = len(parquets) - len(pending)
+        if skipped:
+            info(f"    {skipped} shard(s) already in repo — skipping")
+
+        # One upload_file call is one commit, and the Hub caps commits at 128/hour, so a
+        # per-file loop dies partway through any real dataset. upload_folder preuploads
+        # the LFS blobs and then makes a single commit for the whole batch, so shard
+        # count stops mattering. A failed run re-uses the already-uploaded blobs.
+        uploaded = 0
+        if pending:
+            total_mb = sum(p.stat().st_size for p in pending) / (1024 * 1024)
+            info(f"    Uploading {len(pending)} shard(s), {total_mb:.0f} MB, in one commit…")
+            api.upload_folder(
+                folder_path=str(data_dir),
+                path_in_repo=repo_prefix,
                 repo_id=repo,
                 repo_type="model",
+                allow_patterns=[p.name for p in pending],
+                commit_message=f"Add {len(pending)} {dir_name} shards",
             )
-            uploaded += 1
-            success(f"    ✓ {filepath.name} uploaded")
+            uploaded = len(pending)
 
         success(f"  [{dir_name}] Done: {uploaded} uploaded, {skipped} skipped")
         grand_uploaded += uploaded
@@ -598,7 +607,7 @@ def top_level_menu(base_dir: str) -> str:
 
 # ── HF login helper ───────────────────────────────────────────────────────────
 
-def _hf_login(repo: str) -> object | None:
+def _hf_login(repo: str, private: bool = True) -> object | None:
     """Import HfApi, verify login, ensure repo exists. Returns api or None."""
     try:
         from huggingface_hub import HfApi
@@ -616,7 +625,8 @@ def _hf_login(repo: str) -> object | None:
         err("Run: hf auth login")
         return None
 
-    api.create_repo(repo_id=repo, repo_type="model", private=True, exist_ok=True)
+    repo_type = "dataset" if repo.endswith("/dataset") else "model"
+    api.create_repo(repo_id=repo, repo_type=repo_type, private=private, exist_ok=True)
     info(f"Repo: {repo}\n")
     return api
 
@@ -638,6 +648,11 @@ def main():
                         help="HuggingFace repo ID (default: HF_REPO env var, e.g. johndoe/mesosfer-checkpoints)")
     parser.add_argument("--base-dir", type=str, default=None,
                         help="Override mesosfer cache dir (default: ~/.cache/mesosfer)")
+
+    parser.add_argument("--public", action="store_true", default=False,
+                        help="Make the HuggingFace repository public")
+    parser.add_argument("--private", action="store_true", default=False,
+                        help="Make the HuggingFace repository private (default)")
 
     # Model checkpoint flags (backward-compatible)
     g = parser.add_argument_group("model checkpoint")
@@ -701,7 +716,8 @@ def main():
         args.repo = f"{username}/dataset"
 
     # ── HF login (shared for all artifacts) ──────────────────────────────────
-    api = _hf_login(args.repo)
+    is_private = False if args.public else True
+    api = _hf_login(args.repo, private=is_private)
     if api is None:
         return
 

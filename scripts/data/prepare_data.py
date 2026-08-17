@@ -17,6 +17,7 @@ import json
 import glob
 import hashlib
 import shutil
+import tarfile
 import subprocess
 import argparse
 import logging
@@ -467,6 +468,10 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "climbmix":                0.6,  # very large, keep proportion down
     "wikipedia":               0.5,  # huge corpus, don't let it dominate
     "fineweb_edu":             0.7,
+    # Indonesian — same tier as English general knowledge. Kept low on purpose: weight controls
+    # how often a domain appears in mixed shards, and bursty language switches cause loss spikes.
+    "wikipedia_id":            0.5,
+    "fineweb2_id":             0.6,
     # Code — important for secure coding (~30% effective share)
     "secure_code_python":      1.4,
     "secure_code_c":           1.4,
@@ -478,6 +483,11 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "secure_code_typescript":  1.3,
     "secure_code_java":        1.3,
     "secure_code_php":         1.3,
+    "code_sql":                1.5,  # injection is the most common vuln class
+    "code_powershell":         1.6,  # attacker tooling on Windows, shows up in real logs
+    "code_assembly":           1.6,  # reverse engineering, pairs with local_reverse_engineering
+    "code_csharp":             1.2,
+    "code_jupyter":            1.0,  # ML/AI code
     "metasploit":              1.7,
     "exploitdb":               1.8,
     "swallow_code_v2":         1.3,
@@ -624,6 +634,30 @@ DATASET_SOURCES = {
         "streaming": True,
         "hf_subset": "sample-10BT",
     },
+    # Indonesian foundation. Deliberately small (~3.2B, ~3% of the mix): enough to give the
+    # 96K tokenizer real Indonesian sub-words and to ground the base model, without displacing
+    # the cybersecurity/English budget. Indonesian SFT (data/sft/*.jsonl) builds on top of this —
+    # SFT alone cannot teach a language the base model never saw.
+    "wikipedia_id": {
+        "hf_name": "wikimedia/wikipedia",
+        "description": "Indonesian Wikipedia articles",
+        "category": "general",
+        "max_tokens": 200_000_000,
+        "text_column": "text",
+        "split": "train",
+        "streaming": True,
+        "hf_subset": "20231101.id",
+    },
+    "fineweb2_id": {
+        "hf_name": "HuggingFaceFW/fineweb-2",
+        "description": "Indonesian web text, FineWeb-2 filtering pipeline",
+        "category": "general",
+        "max_tokens": 3_000_000_000,
+        "text_column": "text",
+        "split": "train",
+        "streaming": True,
+        "hf_subset": "ind_Latn",
+    },
 "secure_code_python": {
     "hf_name": "bigcode/the-stack-dedup",
     "description": "Python security-related repositories",
@@ -732,6 +766,67 @@ DATASET_SOURCES = {
     "split": "train",
     "streaming": True,
     "data_dir": "data/php",
+},
+
+# The `code_*` entries below are the same thing as `secure_code_*` above: plain
+# per-language directories of bigcode/the-stack-dedup, no security filter. The older
+# name is kept only because `completed_sources` in progress.json is keyed by source
+# name, so renaming would make every finished shard look un-downloaded.
+"code_sql": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "SQL — queries, schemas, stored procedures (context for injection classes)",
+    "category": "code",
+    "max_tokens": 1_500_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/sql",
+},
+
+"code_powershell": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "PowerShell — Windows administration and offensive tooling",
+    "category": "code",
+    "max_tokens": 800_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/powershell",
+},
+
+"code_assembly": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "Assembly — disassembly listings and low-level routines (reverse engineering)",
+    "category": "code",
+    "max_tokens": 800_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/assembly",
+},
+
+"code_csharp": {
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "C# — .NET applications and tooling",
+    "category": "code",
+    "max_tokens": 2_000_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/c-sharp",
+},
+
+"code_jupyter": {
+    # Notebooks are where machine-learning and AI code actually lives on GitHub:
+    # training loops, data pipelines, model evaluation, interleaved with prose.
+    "hf_name": "bigcode/the-stack-dedup",
+    "description": "Jupyter notebooks — machine learning and AI code with inline explanation",
+    "category": "code",
+    "max_tokens": 2_000_000_000,
+    "text_column": "content",
+    "split": "train",
+    "streaming": True,
+    "data_dir": "data/jupyter-notebook",
 },
 
 "swallow_code_v2": {
@@ -2076,15 +2171,26 @@ def create_checkpoint(output_dir, checkpoint_dir, checkpoint_number):
     archive_path = os.path.join(checkpoint_dir, checkpoint_name)
 
     logger.info(f"  💾 Creating checkpoint #{checkpoint_number} → {archive_path}.tar.gz")
-    result = shutil.make_archive(
-        archive_path,
-        "gztar",
-        root_dir=os.path.dirname(output_dir),
-        base_dir=os.path.basename(output_dir),
-    )
-    if not result:
-        raise RuntimeError(f"Checkpoint creation failed (returned empty path) for {archive_path}")
     archive_full = archive_path + ".tar.gz"
+    tmp_archive = archive_full + ".tmp"
+    base_name = os.path.basename(output_dir)
+
+    # Built by hand rather than shutil.make_archive so transient files can be skipped.
+    # make_archive walks the directory and stats each entry; *.valpart and *.tmp are
+    # written and deleted as shards flush (write_final_val_shard removes them all after
+    # merging), so one can disappear between the listing and the stat, and the resulting
+    # FileNotFoundError used to kill the whole run mid-download. They are also worthless
+    # inside a checkpoint: only the finished .parquet shards and progress.json matter.
+    with tarfile.open(tmp_archive, "w:gz") as tar:
+        for entry in sorted(os.listdir(output_dir)):
+            if entry.endswith((".valpart", ".tmp")):
+                continue
+            try:
+                tar.add(os.path.join(output_dir, entry), arcname=os.path.join(base_name, entry))
+            except FileNotFoundError:
+                logger.warning(f"  Skipping file that vanished during checkpoint: {entry}")
+    os.replace(tmp_archive, archive_full)
+
     if not os.path.isfile(archive_full):
         raise RuntimeError(f"Checkpoint archive not found after creation: {archive_full}")
     size_gb = os.path.getsize(archive_full) / (1024**3)
@@ -2236,18 +2342,57 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     rng = random.Random(42)
 
     t0 = time.time()
-    shard_idx = 0
-    val_part_idx = 0
-    stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+
+    # Resume. Without this the function always started at shard_00000, so running it a
+    # second time (e.g. to add sources with --sources) silently overwrote the shards the
+    # previous run had written, and only the tail of the older run survived. The resume
+    # code that used to exist lived below the interleaved dispatch in main(), i.e. only
+    # on the sequential path, so the default mode never reached it.
+    # --fresh already deleted progress.json and the parquet files before we get here, so
+    # finding a progress file at this point unambiguously means "continue".
+    prev = load_progress(output_dir)
+    requested_all = list(source_names)
+    already_done: set = set()
+    if prev is not None:
+        already_done = set(normalize_completed_sources(prev, require_docs=True))
+        requested_all = sorted(set(prev.get("requested_sources") or []) | set(source_names))
+        pending = [n for n in source_names if n not in already_done]
+        skipped = [n for n in source_names if n in already_done]
+        shard_idx = prev.get("next_shard_idx", 0)
+        val_part_idx = prev.get("next_val_part_idx", 0)
+        stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+        for name, counts in prev.get("stats", {}).items():
+            stats[name] = counts
+        checkpoint_number = prev.get("checkpoint_number", 0)
+        bytes_at_last_checkpoint = prev.get("bytes_at_last_checkpoint", 0)
+        logger.info(f"Resuming interleaved run at shard_idx={shard_idx} "
+                    f"({len(already_done)} source(s) already complete).")
+        if skipped:
+            logger.info(f"  Skipping already-complete sources: {', '.join(skipped)}")
+        if not pending:
+            print("\n  ✅ All requested sources are already complete. Use --fresh to redo them.\n")
+            return
+        source_names = pending
+    else:
+        shard_idx = 0
+        val_part_idx = 0
+        stats = defaultdict(lambda: {"docs": 0, "chars": 0})
+        checkpoint_number = 0
+        bytes_at_last_checkpoint = 0
+
     global_max_chars = int(args.max_tokens * CHARS_PER_TOKEN) if args.max_tokens else None
-    global_chars = 0
-    cluster_size = getattr(args, 'cluster_size', 32)  # docs of same domain per run
+    # Cumulative across runs: --max-tokens is a total budget, not a per-invocation one.
+    global_chars = sum(s["chars"] for s in stats.values())
+    if global_max_chars is not None and global_chars >= global_max_chars:
+        print(f"\n  ⚠️  Token budget already reached "
+              f"(~{int(global_chars / CHARS_PER_TOKEN):,} >= {args.max_tokens:,}).")
+        print("  Raise --max-tokens to give the new sources room, or use --fresh.\n")
+        return
+    cluster_size = getattr(args, 'cluster_size', 32)  # docs of same domain run
     temperature = getattr(args, 'sampling_temperature', 1.2)
 
     checkpoint_dir = args.checkpoint_dir or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     checkpoint_every_bytes = int(args.checkpoint_every_gb * 1024 * 1024 * 1024)
-    bytes_at_last_checkpoint = 0
-    checkpoint_number = 0
 
     # Open all source iterators
     logger.info(f"Opening {len(source_names)} source iterators for interleaved streaming...")
@@ -2357,7 +2502,10 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     print("-" * 85)
     total_docs = 0
     total_chars = 0
-    for source_name in source_names:
+    # Every source with data on disk, not just the ones this invocation handled, so the
+    # totals and category shares describe the whole dataset across incremental batches.
+    summary_sources = [n for n in DATASET_SOURCES if stats.get(n, {}).get("docs")]
+    for source_name in summary_sources:
         s = stats[source_name]
         est_tokens = int(s["chars"] / CHARS_PER_TOKEN)
         total_docs += s["docs"]
@@ -2381,7 +2529,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     cat_tokens = {}
     for cat in ["cybersecurity", "code", "general", "instruction"]:
         cat_tokens[cat] = sum(int(stats[n]["chars"] / CHARS_PER_TOKEN)
-                              for n in source_names
+                              for n in summary_sources
                               if DATASET_SOURCES[n]["category"] == cat)
     if total_tokens > 0:
         for cat in ["cybersecurity", "code", "general", "instruction"]:
@@ -2391,11 +2539,22 @@ def interleaved_shuffle_main(args, source_names, output_dir):
                 print(f"  {emoji} {cat.capitalize():15s}: ~{cat_tokens[cat]:,} tokens ({pct:.1f}%)")
     print()
 
-    if global_chars > 0:
+    # Final checkpoint, subject to the same threshold as the periodic ones. This used to
+    # run unconditionally, which meant --checkpoint-every-gb could not switch checkpoints
+    # off: each archive is a full tar.gz of the output dir, so N incremental --sources
+    # batches left N snapshots behind. Seven batches over a 15 GB dataset produced 46 GB
+    # of archives and filled the disk.
+    final_bytes = get_total_parquet_bytes(output_dir)
+    if global_chars > 0 and (final_bytes - bytes_at_last_checkpoint) >= checkpoint_every_bytes:
         create_checkpoint(output_dir, checkpoint_dir, checkpoint_number)
+    elif global_chars > 0:
+        logger.info(f"  Skipping final checkpoint (< {args.checkpoint_every_gb:g} GB since the last one). "
+                    f"Resume uses progress.json, not the archives.")
 
     save_progress(output_dir, {
-        "completed_sources": source_names,
+        # Union, not replacement: overwriting these was what made each --sources batch
+        # erase the record of the previous ones, so --status only ever showed the last run.
+        "completed_sources": sorted(already_done | set(source_names)),
         "next_shard_idx": shard_idx,
         "stats": dict(stats),
         "finished": True,
@@ -2403,7 +2562,7 @@ def interleaved_shuffle_main(args, source_names, output_dir):
         "bytes_at_last_checkpoint": get_total_parquet_bytes(output_dir),
         "checkpoint_number": checkpoint_number + 1,
         "next_val_part_idx": val_part_idx,
-        "requested_sources": source_names,
+        "requested_sources": requested_all,
     })
 
     verify_shard_balance(output_dir)
@@ -2514,6 +2673,10 @@ def estimate_tokens_for_depth(depth, target_param_data_ratio=15, aspect_ratio=12
     return target_tokens
 
 
+# Depths that get a CLI shortcut (--12 / --d12 etc). Any other depth still works via --depth N.
+DEPTH_SHORTCUTS = (12, 16, 20, 24, 32)
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -2558,32 +2721,36 @@ def main():
                         help="Target Transformer depth to scale the dataset size to (e.g. 12, 16, 20, 24, 32)")
     parser.add_argument("--target-param-data-ratio", type=float, default=15.0,
                         help="Data-to-parameters ratio used to scale dataset size from depth (default: 15)")
-    # Shortcuts for specific depths as requested by the user
-    parser.add_argument("--12", dest="depth_12", action="store_true", help="Shortcut for --depth 12")
-    parser.add_argument("--16", dest="depth_16", action="store_true", help="Shortcut for --depth 16")
-    parser.add_argument("--20", dest="depth_20", action="store_true", help="Shortcut for --depth 20")
-    parser.add_argument("--24", dest="depth_24", action="store_true", help="Shortcut for --depth 24")
-    parser.add_argument("--32", dest="depth_32", action="store_true", help="Shortcut for --depth 32")
+    # model_dim = depth x aspect_ratio, so this shifts the token target by ~4x between 64 and 128.
+    # It MUST match the --aspect-ratio you later pass to base_train, or the dataset is sized for a
+    # different model than the one you train (i.e. exactly the over/under-training this flag prevents).
+    parser.add_argument("--aspect-ratio", type=int, default=128,
+                        help="Model dim = depth x aspect-ratio; must match base_train (default: 128)")
+    # Shortcuts for specific depths: both --12 and --d12 map to --depth 12
+    for _d in DEPTH_SHORTCUTS:
+        parser.add_argument(f"--{_d}", f"--d{_d}", dest=f"depth_{_d}", action="store_true",
+                            help=f"Shortcut for --depth {_d}")
     parser.add_argument("--sample-10k", action="store_true",
                       help="Prepare a tiny 10,000-token sample of datasets for fast testing")
     args = parser.parse_args()
 
     # Resolve depth shortcuts
-    if args.depth_12:
-        args.depth = 12
-    elif args.depth_16:
-        args.depth = 16
-    elif args.depth_20:
-        args.depth = 20
-    elif args.depth_24:
-        args.depth = 24
-    elif args.depth_32:
-        args.depth = 32
+    for _d in DEPTH_SHORTCUTS:
+        if getattr(args, f"depth_{_d}"):
+            args.depth = _d
+            break
 
     # Scale max_tokens based on depth if specified
     if args.depth is not None:
-        target_tokens = estimate_tokens_for_depth(args.depth, target_param_data_ratio=args.target_param_data_ratio)
-        logger.info(f"Target depth {args.depth} specified. Calculated compute-optimal pretrain tokens: {target_tokens:,}")
+        target_tokens = estimate_tokens_for_depth(
+            args.depth,
+            target_param_data_ratio=args.target_param_data_ratio,
+            aspect_ratio=args.aspect_ratio,
+        )
+        logger.info(
+            f"Target depth {args.depth} (aspect-ratio {args.aspect_ratio}, ratio {args.target_param_data_ratio:g}). "
+            f"Calculated compute-optimal pretrain tokens: {target_tokens:,}"
+        )
         if args.max_tokens is None:
             args.max_tokens = target_tokens
         else:

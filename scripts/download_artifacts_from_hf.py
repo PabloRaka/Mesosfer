@@ -47,6 +47,13 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ── UI helpers (shared with upload script) ────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from _ui import (  # noqa: E402
@@ -124,7 +131,7 @@ def _resolve_username(cli_value: str | None) -> str:
 # ── Constants ────────────────────────────────────────────────────────────────
 
 DEFAULT_REPO = None  # resolved at runtime via _resolve_username()
-DEFAULT_DEPTH = "d32"
+DEFAULT_DEPTH = "d12"
 
 SOURCE_DIR_MAP = {
     "base": "base_checkpoints",
@@ -169,6 +176,26 @@ def _require_hf_hub():
         sys.exit(1)
     from huggingface_hub import HfApi, hf_hub_download
     return HfApi, hf_hub_download
+
+
+def _place_downloaded(cached: str, local_path) -> None:
+    """Move a freshly downloaded file out of the HF cache into the mesosfer layout.
+
+    hf_hub_download returns a path inside the snapshot dir, which is a symlink whose
+    target is *relative* (../../blobs/<sha>). os.replace on that path moves the link
+    itself, so the target only still resolves if the destination happens to sit at the
+    same directory depth — which is why the dataset survived and the tokenizer did not.
+    Move the blob it points at instead, and drop the now-dangling snapshot link.
+    """
+    import shutil
+
+    real = os.path.realpath(cached)
+    try:
+        os.replace(real, local_path)
+    except OSError:
+        shutil.copy2(real, local_path)  # cross-device
+    if os.path.islink(cached):
+        os.unlink(cached)
 
 
 def _whoami(api) -> str | None:
@@ -273,13 +300,7 @@ def _download_one_step(api, hf_hub_download, repo: str, prefix: str,
             filename=f"{prefix}{name}",
             token=token,
         )
-        # Move/symlink cached file into mesosfer cache layout
-        try:
-            os.replace(cached, local_path)
-        except OSError:
-            # Cross-device: fall back to copy
-            import shutil
-            shutil.copy2(cached, local_path)
+        _place_downloaded(cached, local_path)
         success(f"  ✓ {name} → {local_path}")
         downloaded += 1
     return downloaded, len(targets)
@@ -541,11 +562,7 @@ def download_tokenizer(args, base_dir: Path) -> None:
         except Exception as e:
             err(f"  ✗ {name}: {e}")
             continue
-        try:
-            os.replace(cached, local_path)
-        except OSError:
-            import shutil
-            shutil.copy2(cached, local_path)
+        _place_downloaded(cached, local_path)
         success(f"  ✓ {name} → {local_path}")
         downloaded += 1
 
@@ -634,12 +651,7 @@ def download_dataset(args, base_dir: Path) -> None:
                 err(f"    ✗ {filename}: {e}")
                 continue
 
-            # Move from HF cache into mesosfer cache layout
-            try:
-                os.replace(cached, local_path)
-            except OSError:
-                import shutil
-                shutil.copy2(cached, local_path)
+            _place_downloaded(cached, local_path)
             success(f"    ✓ {filename} → {local_path}")
             downloaded += 1
 

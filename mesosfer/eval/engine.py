@@ -88,6 +88,42 @@ def use_calculator(expr):
     # Evaluate with timeout
     return eval_with_timeout(expr)
 
+def execute_tool(payload_str):
+    """
+    Execute a tool call emitted between <|tool_start|> and <|tool_end|>.
+    Payload can be JSON: {"name": "...", "arguments": {...}} or raw python/calc expression.
+    Returns string output to be placed between <|output_start|> and <|output_end|>.
+    """
+    import json
+    from mesosfer.sandbox.runner import get_default_sandbox
+
+    payload_str = payload_str.strip()
+    if not payload_str:
+        return None
+
+    try:
+        data = json.loads(payload_str)
+    except Exception:
+        data = None
+
+    sandbox = get_default_sandbox()
+
+    if isinstance(data, dict) and "name" in data:
+        name = str(data.get("name", ""))
+        args = data.get("arguments", {})
+        return sandbox.run_tool_call(name, args)
+
+    # Fallback to calculator or python execution
+    calc_res = use_calculator(payload_str)
+    if calc_res is not None:
+        return str(calc_res)
+
+    res = sandbox.execute_python(payload_str)
+    if res["success"] and res["stdout"]:
+        return res["stdout"]
+
+    return None
+
 # -----------------------------------------------------------------------------
 class KVCache:
     """
@@ -166,14 +202,34 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
         return torch.multinomial(probs, num_samples=1, generator=rng)
 
 # -----------------------------------------------------------------------------
+def apply_repetition_penalty(logits, token_history, penalty=1.0):
+    """
+    Apply repetition penalty to logits for tokens that have appeared in history.
+    Positive logits: logit / penalty
+    Negative logits: logit * penalty
+    """
+    if penalty == 1.0 or not token_history:
+        return logits
+    for row_idx, history in enumerate(token_history):
+        if not history:
+            continue
+        unique_tokens = list(set(history))
+        row_logits = logits[row_idx, unique_tokens]
+        penalized = torch.where(row_logits > 0, row_logits / penalty, row_logits * penalty)
+        logits[row_idx, unique_tokens] = penalized
+    return logits
+
+# -----------------------------------------------------------------------------
 
 class RowState:
     # Per-row state tracking during generation
     def __init__(self, current_tokens=None):
         self.current_tokens = current_tokens or [] # Current token sequence for this row
         self.forced_tokens = deque() # Queue of tokens to force inject
-        self.in_python_block = False # Whether we are inside a python block
-        self.python_expr_tokens = [] # Tokens of the current python expression
+        self.in_calc_block = False # Whether we are inside a python calc block
+        self.calc_expr_tokens = [] # Tokens of the current python calc expression
+        self.in_tool_block = False # Whether we are inside a named tool block
+        self.tool_tokens = [] # Tokens of the current named tool call payload
         self.completed = False # Whether this row has completed generation
 
 class Engine:
@@ -183,7 +239,7 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42, stop_on_tool_call=False):
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, repetition_penalty=1.0, seed=42, stop_on_tool_call=False):
         """Same as generate, but does single prefill and then clones the KV cache.
 
         stop_on_tool_call: when True, a row completes as soon as it emits <|tool_end|>
@@ -205,13 +261,14 @@ class Engine:
 
         # Get the special tokens we need to coordinate the tool use state machine
         get_special = lambda s: self.tokenizer.encode_special(s)
-        python_start = get_special("<|python_start|>")
-        python_end = get_special("<|python_end|>")
+        calc_start = get_special("<|calc_start|>")
+        calc_end = get_special("<|calc_end|>")
+        tool_start = get_special("<|tool_start|>")
+        tool_end = get_special("<|tool_end|>")
         output_start = get_special("<|output_start|>")
         output_end = get_special("<|output_end|>")
         assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
         bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
-        tool_end = get_special("<|tool_end|>") # generic named tool call terminator (used when stop_on_tool_call)
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
@@ -252,8 +309,15 @@ class Engine:
             if all(state.completed for state in row_states):
                 break
 
+            # Apply repetition penalty if configured
+            if repetition_penalty > 1.0:
+                history = [state.current_tokens for state in row_states]
+                logits_to_sample = apply_repetition_penalty(logits.clone(), history, repetition_penalty)
+            else:
+                logits_to_sample = logits
+
             # Sample the next token for each row
-            next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
+            next_ids = sample_next_token(logits_to_sample, rng, temperature, top_k)  # (B, 1)
             sampled_tokens = next_ids[:, 0].tolist()
 
             # Process each row: choose the next token, update state, optional tool use
@@ -274,23 +338,42 @@ class Engine:
                 # (instead of letting the model fabricate the tool output).
                 elif stop_on_tool_call and next_token == tool_end:
                     state.completed = True
-                # Handle tool logic
-                if next_token == python_start:
-                    state.in_python_block = True
-                    state.python_expr_tokens = []
-                elif next_token == python_end and state.in_python_block:
-                    state.in_python_block = False
-                    if state.python_expr_tokens:
-                        expr = self.tokenizer.decode(state.python_expr_tokens)
+
+                # Handle calculator logic (<|calc_start|> ... <|calc_end|>)
+                if next_token == calc_start:
+                    state.in_calc_block = True
+                    state.calc_expr_tokens = []
+                elif next_token == calc_end and state.in_calc_block:
+                    state.in_calc_block = False
+                    if state.calc_expr_tokens:
+                        expr = self.tokenizer.decode(state.calc_expr_tokens)
                         result = use_calculator(expr)
                         if result is not None:
                             result_tokens = self.tokenizer.encode(str(result))
                             state.forced_tokens.append(output_start)
                             state.forced_tokens.extend(result_tokens)
                             state.forced_tokens.append(output_end)
-                    state.python_expr_tokens = []
-                elif state.in_python_block:
-                    state.python_expr_tokens.append(next_token)
+                    state.calc_expr_tokens = []
+                elif state.in_calc_block:
+                    state.calc_expr_tokens.append(next_token)
+
+                # Handle named tool logic (<|tool_start|> ... <|tool_end|>)
+                if next_token == tool_start:
+                    state.in_tool_block = True
+                    state.tool_tokens = []
+                elif next_token == tool_end and state.in_tool_block:
+                    state.in_tool_block = False
+                    if state.tool_tokens:
+                        payload = self.tokenizer.decode(state.tool_tokens)
+                        result = execute_tool(payload)
+                        if result is not None:
+                            result_tokens = self.tokenizer.encode(str(result))
+                            state.forced_tokens.append(output_start)
+                            state.forced_tokens.extend(result_tokens)
+                            state.forced_tokens.append(output_end)
+                    state.tool_tokens = []
+                elif state.in_tool_block:
+                    state.tool_tokens.append(next_token)
 
             # Yield the token column
             yield token_column, token_masks

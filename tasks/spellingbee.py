@@ -38,17 +38,30 @@ WORD_LIST_URL = "https://raw.githubusercontent.com/dwyl/english-words/refs/heads
 # A number bigger than 370K to separate train and test random seeds
 TEST_RANDOM_SEED_OFFSET = 10_000_000
 
-# Identical to gsm8k's answer extraction
-ANSWER_RE = re.compile(r"#### (\-?[0-9\.\,]+)")
+# Answer extraction supporting ####, boxed, and conversational numbers
+ANSWER_RE = re.compile(r"####\s*([\$]?\s*[\-0-9\.\,]+)")
 def extract_answer(completion):
     """
-    Extract the numerical answer after #### marker.
+    Extract the numerical answer supporting:
+    - Standard #### marker
+    - LaTeX \\boxed{} marker
+    - Conversational phrases ("count is X", "appears X times", "there are X", "is X")
+    - Last standalone integer in completion
     """
+    if not completion:
+        return None
     match = ANSWER_RE.search(completion)
     if match:
-        match_str = match.group(1).strip()
-        match_str = match_str.replace(",", "")
-        return match_str
+        return match.group(1).replace("$", "").replace(",", "").strip()
+    match = re.search(r"\\boxed\{\s*[\$]?\s*([\-0-9\.\,]+)\s*\}", completion)
+    if match:
+        return match.group(1).replace("$", "").replace(",", "").strip()
+    matches = re.findall(r"(?:count is|appears?|there (?:is|are)|answer is|\bis\b|=)\s*([\-0-9\.\,]+)", completion, re.IGNORECASE)
+    if matches:
+        return matches[-1].replace(",", "").strip().rstrip(".")
+    numbers = re.findall(r"\b\d+\b", completion)
+    if numbers:
+        return numbers[-1]
     return None
 
 # User message templates for data augmentation
@@ -187,10 +200,10 @@ Then count the occurrences of '{letter}':
         # Part 2: Python verification
         assistant_parts.append({"type": "text", "text": "\n\nLet me double check this using Python:\n\n"})
         # Part 3: Python tool call
-        python_expr = f"'{word}'.count('{letter}')"
-        assistant_parts.append({"type": "python", "text": python_expr})
+        calc_expr = f"'{word}'.count('{letter}')"
+        assistant_parts.append({"type": "calc", "text": calc_expr})
         # Part 4: Python output
-        assistant_parts.append({"type": "python_output", "text": str(count)})
+        assistant_parts.append({"type": "calc_output", "text": str(count)})
         # Part 5: Final answer
         assistant_parts.append({"type": "text", "text": f"\n\nPython gives us {count}.\n\nMy final answer is:\n\n#### {count}"})
 
@@ -284,9 +297,9 @@ if __name__ == "__main__":
         for part in assistant_parts:
             if part['type'] == 'text':
                 print(part['text'], end='')
-            elif part['type'] == 'python':
+            elif part['type'] == 'calc':
                 print(f"<<{part['text']}=", end='')
-            elif part['type'] == 'python_output':
+            elif part['type'] == 'calc_output':
                 print(f"{part['text']}>>", end='')
         print()
         print("-" * 100)

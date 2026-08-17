@@ -65,6 +65,25 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### 3. Create Virtual Environment
 
+First check whether the host already ships PyTorch:
+
+```bash
+/usr/bin/python3 -c "import torch; print(torch.__version__, torch.version.hip)"
+```
+
+**If that prints a version** (pre-built PyTorch-ROCm image), inherit it — a plain
+`uv venv` is isolated and would hide it, which then makes `--no-build-isolation`
+fail with `No module named 'torch'`:
+
+```bash
+cd /path/to/mesosfer
+uv venv --python 3.12 --system-site-packages
+source .venv/bin/activate
+```
+
+**If it errors with `No module named 'torch'`** (driver-only VM), a plain venv is
+correct and torch is installed from the wheel index in step 4:
+
 ```bash
 cd /path/to/mesosfer
 uv venv --python 3.12
@@ -73,19 +92,45 @@ source .venv/bin/activate
 
 ### 4. Install with ROCm Support
 
-```bash
-# For ROCm 7.0 pre-built images (PyTorch 2.6.0 already installed in image):
-uv sync --extra rocm --no-build-isolation
+Check the driver version first, because the wheel index has to match it:
 
-# Install Flash Attention 2 for ROCm (enables faster training vs SDPA fallback)
-uv pip install flash-attn --no-build-isolation
+```bash
+ls -d /opt/rocm-*
 ```
 
-> **Why `--no-build-isolation`?** The `PyTorch 2.6.0 - ROCm 7.0` image has torch
-> pre-installed at the system level. This flag tells uv to reuse it instead of
-> downloading from the WHL index (which only carries ROCm 6.4 builds).
-> The same flag is needed for `flash-attn` because it compiles against the
-> pre-installed ROCm torch headers.
+`pyproject.toml` points at `whl/rocm7.2`, which is right for any ROCm 7.x driver
+(the wheels bundle their own runtime). On a ROCm 6.x host, change that index URL
+to `whl/rocm6.4` before syncing.
+
+```bash
+uv sync --extra rocm --no-build-isolation
+```
+
+```bash
+# Flash Attention 2 for ROCm (faster than the SDPA fallback; optional)
+# The env var selects the Triton AMD backend. Without it the build targets CUDA and
+# the install "succeeds", but importing it raises
+# ModuleNotFoundError: No module named 'flash_attn_2_cuda' and mesosfer silently
+# falls back to SDPA. Activate the venv first, or uv installs into the wrong place.
+source .venv/bin/activate
+FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE uv pip install flash-attn --no-build-isolation
+```
+
+Verify it is actually picked up (mesosfer sets the same env var internally at import,
+so this should report `fa2` without you exporting anything):
+
+```bash
+python -c "from mesosfer.model.flash_attention import ATTENTION_BACKEND; print(ATTENTION_BACKEND)"
+```
+
+> **FlashAttention-3 is not available on AMD.** Upstream states it requires an
+> H100/H800 with CUDA >= 12.3 — it relies on Hopper-only instructions. `fa2` is the
+> ceiling on MI300X, and `_load_flash_attention_3()` returns early on ROCm by design.
+
+> **Why `--no-build-isolation`?** `flash-attn` compiles against the ROCm torch
+> headers of the torch that is already installed. Without the flag, pip would set
+> up an isolated build environment and pull a fresh (CUDA) torch to build against,
+> which then does not match the ROCm torch at runtime.
 
 ### 5. Verify Installation
 
@@ -444,6 +489,15 @@ pip install flash-attn --no-build-isolation
 # Verify ROCm 7.0 is detected:
 python -c "import torch; print(torch.version.hip)"
 ```
+
+**`TypeError: expected Tensor() for op: torch.ops.flash_attn._flash_attn_forward.default`**
+
+Raised from generated inductor code (`/tmp/torchinductor_root/.../*.py`) on the first
+training step. TorchInductor cannot handle the ROCm Triton flash-attn custom op and
+emits an `assert_size_stride` against it. `mesosfer/model/flash_attention.py` wraps the
+entry points in `torch.compiler.disable` on ROCm+fa2 so dynamo graph-breaks there; if
+you hit this after changing that file, that guard is what went missing. Setting
+`TORCHDYNAMO_DISABLE=1` also works but gives up compilation for the whole model.
 
 ### Multi-GPU Training Fails
 

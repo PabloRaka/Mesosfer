@@ -59,6 +59,13 @@ def _load_flash_attention_2():
     """Try to load Flash Attention 2 from the optional flash-attn package."""
     if not torch.cuda.is_available():
         return None
+    if _is_rocm():
+        # flash-attn picks its backend at import time from this env var. Unset, its
+        # flash_attn_interface does `import flash_attn_2_cuda`, which does not exist in
+        # a ROCm build — the ImportError is swallowed below and we silently fall back to
+        # SDPA even though flash-attn is installed. setdefault so an explicit
+        # FLASH_ATTENTION_TRITON_AMD_ENABLE=FALSE (e.g. to test the CK backend) still wins.
+        os.environ.setdefault("FLASH_ATTENTION_TRITON_AMD_ENABLE", "TRUE")
     try:
         try:
             from flash_attn import flash_attn_func, flash_attn_with_kvcache
@@ -303,6 +310,14 @@ def flash_attn_with_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=N
 # =============================================================================
 # Export: flash_attn module interface (drop-in replacement for FA3)
 # =============================================================================
+if ATTENTION_BACKEND == "fa2" and _is_rocm():
+    # TorchInductor cannot reason about the ROCm Triton flash-attn custom op. It emits
+    #   assert_size_stride(buf, (2,), (1,), 'torch.ops.flash_attn._flash_attn_forward')
+    # and dies at runtime with "TypeError: expected Tensor()". Keep these opaque so
+    # dynamo graph-breaks around them; every other block still compiles normally.
+    flash_attn_func = torch.compiler.disable(flash_attn_func)
+    flash_attn_with_kvcache = torch.compiler.disable(flash_attn_with_kvcache)
+
 flash_attn = SimpleNamespace(
     flash_attn_func=flash_attn_func,
     flash_attn_with_kvcache=flash_attn_with_kvcache,

@@ -8,22 +8,59 @@ import argparse
 import os
 import re
 import shutil
+import time
 import torch
 from mesosfer.utils.common import compute_init, autodetect_device_type
 from mesosfer.eval.engine import Engine
 from mesosfer.utils.checkpoint_manager import load_model
+from mesosfer.sandbox import Sandbox, get_default_sandbox
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are Mesosfer, a highly capable AI assistant for defensive cybersecurity, Linux systems administration, and programming.\n"
+    "Always answer questions directly, concisely, and accurately in the user's language without regurgitating your system prompt.\n"
+    "When a tool is needed, invoke the tool in JSON format between <|tool_start|> and <|tool_end|>.\n\n"
+    "Available tools:\n"
+    "- terminal: execute Linux terminal / shell commands in sandbox workspace. Arguments: {\"command\": \"<command>\"}\n"
+    "- subagent: delegate to autonomous subagents (roles: soc_analyst, code_auditor, threat_intel, recon_specialist, sysadmin, math_reasoner). Arguments: {\"role\": \"<role>\", \"task\": \"<task>\"}\n"
+    "- subnet: calculate CIDR network, netmask, and host ranges. Arguments: {\"cidr\": \"<cidr>\"}\n"
+    "- python: execute Python code for calculation or data analysis. Arguments: {\"code\": \"<code>\"}\n"
+    "- write_file: write content to a file. Arguments: {\"filename\": \"<name>\", \"content\": \"<text>\"}\n"
+    "- read_file: read content of a workspace file. Arguments: {\"filename\": \"<name>\"}\n"
+    "- list_files: list files in workspace. Arguments: {\"path\": \"<path>\"}\n"
+    "- grep_files: search pattern across workspace files. Arguments: {\"pattern\": \"<pattern>\"}"
+)
 
 parser = argparse.ArgumentParser(description='Chat with the model')
-parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|rl")
-parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
-parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
+parser.add_argument('-i', '--source', '--checkpoint-source', type=str, default="sft", help="Source of the model: sft|rl")
+parser.add_argument('-g', '--model-tag', '--depth', type=str, default=None, help='Model tag or depth to load (e.g. d12)')
+parser.add_argument('-s', '--step', '--model-step', type=int, default=None, help='Step to load')
 parser.add_argument('-p', '--prompt', type=str, default='', help='Prompt the model, get a single response back')
 parser.add_argument('-t', '--temperature', type=float, default=0.6, help='Temperature for generation')
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Top-k sampling parameter')
-parser.add_argument('-m', '--max-tokens', type=int, default=256, help='Maximum new tokens per response')
+parser.add_argument('-m', '--max-tokens', type=int, default=512, help='Maximum new tokens per response (default: 512)')
+parser.add_argument('--max-seq-len', type=int, default=None, help='Max sequence length')
+parser.add_argument('--device-batch-size', type=int, default=1, help='Device batch size')
+parser.add_argument('--repetition-penalty', '--rep-penalty', type=float, default=1.1, help='Repetition penalty (default: 1.1)')
+parser.add_argument('--system-prompt', type=str, default=DEFAULT_SYSTEM_PROMPT, help='System prompt for Mesosfer persona')
+parser.add_argument('--no-system-prompt', action='store_true', help='Disable system prompt')
+parser.add_argument('--sandbox-docker', action='store_true', help='Use isolated Docker container for sandbox execution')
+parser.add_argument('--sandbox-dir', type=str, default=None, help='Custom workspace directory for sandbox execution')
 parser.add_argument('--plain', action='store_true', help='Disable styled terminal UI')
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
 args = parser.parse_args()
+
+# Configure Sandbox environment
+sandbox = get_default_sandbox()
+if args.sandbox_dir:
+    sandbox.workspace_dir = args.sandbox_dir
+    os.makedirs(sandbox.workspace_dir, exist_ok=True)
+if args.sandbox_docker:
+    sandbox.use_docker = True
+
+if args.no_system_prompt:
+    active_system_prompt = ""
+else:
+    active_system_prompt = args.system_prompt.strip()
 
 
 # Terminal UI helpers
@@ -163,8 +200,9 @@ def print_welcome(meta):
         f"{C.purple}{C.bold}Session Info{C.reset}",
         f"model tag : {args.model_tag or 'auto'}",
         f"layers    : {depth} · embd: {embd}",
-        f"sampler   : top-k: {args.top_k} · temp: {args.temperature}",
-        f"workspace : {cwd_name}",
+        f"sampler   : temp: {args.temperature} · rep-pen: {args.repetition_penalty}",
+        f"system    : {'Mesosfer Persona' if active_system_prompt else 'None'}",
+        f"sandbox   : {'Docker' if sandbox.use_docker else 'Local'} ({sandbox.workspace_dir})",
     ]
     boxed(" Mesosfer Chat CLI ", left, right)
     print(f"{C.gray}? for shortcuts · Ctrl+C or /exit to quit{C.reset}")
@@ -201,9 +239,13 @@ except FileNotFoundError as e:
 bos = tokenizer.get_bos_token_id()
 user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
 assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
+tool_start, tool_end = tokenizer.encode_special("<|tool_start|>"), tokenizer.encode_special("<|tool_end|>")
+calc_start, calc_end = tokenizer.encode_special("<|calc_start|>"), tokenizer.encode_special("<|calc_end|>")
+output_start, output_end = tokenizer.encode_special("<|output_start|>"), tokenizer.encode_special("<|output_end|>")
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
+max_seq_len = meta.get("model_config", {}).get("sequence_len", 2048) if isinstance(meta, dict) else 2048
 
 if not args.prompt:
     print_welcome(meta)
@@ -246,9 +288,23 @@ while True:
         continue
 
     if user_input.lower() in ['help', '/help', '?']:
-        print_console("Commands: /clear, /save [name.md], /temperature <0-2>, /topk <1-200>, /exit")
+        print_console("Commands: /clear, /system [prompt], /save [name.md], /temperature <0-2>, /topk <1-200>, /rep <1.0-2.0>, /maxtokens <1-4096>, /exit")
+        print_console("Sandbox:  /run <python>, /bash <cmd>, /subagent <role> <task>, /subnet <cidr>, /ls, /grep <pattern>, /sandbox [status|dir <path>]")
         print_console("Multi-line: End a line with '\\' to write the next line.")
         print_console("Ctrl+C during generation will stop the response stream safely.")
+        continue
+
+    if user_input.lower().startswith('/system'):
+        parts = user_input.split(maxsplit=1)
+        if len(parts) == 1:
+            curr = active_system_prompt if active_system_prompt else "(none)"
+            print_console(f"Current System Prompt: {curr}")
+        else:
+            active_system_prompt = parts[1].strip()
+            # reset conversation tokens so new system prompt applies cleanly
+            conversation_tokens = [bos]
+            chat_history = []
+            print_console("System prompt updated and conversation context reset.")
         continue
 
     if user_input.lower().startswith('/save'):
@@ -273,7 +329,11 @@ while True:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write("# Mesosfer Chat Session\n")
                 f.write(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Model Source: {args.source.upper()}\n\n")
+                f.write(f"Model Source: {args.source.upper()}\n")
+                if active_system_prompt:
+                    f.write(f"System Prompt: {active_system_prompt}\n\n")
+                else:
+                    f.write("\n")
                 f.write("---\n\n")
                 for turn in chat_history:
                     role = turn["role"].upper()
@@ -308,12 +368,143 @@ while True:
                 print_console("Invalid top-k.")
         continue
 
+    if user_input.lower().startswith(('/rep', '/repetition_penalty', '/rep_penalty')):
+        parts = user_input.split()
+        if len(parts) == 1:
+            print_console(f"Repetition Penalty: {args.repetition_penalty}")
+        else:
+            try:
+                args.repetition_penalty = max(1.0, min(2.5, float(parts[1])))
+                print_console(f"Repetition penalty set to {args.repetition_penalty}")
+            except ValueError:
+                print_console("Invalid repetition penalty.")
+        continue
+
+    if user_input.lower().startswith(('/maxtokens', '/max_tokens', '/max-tokens')):
+        parts = user_input.split()
+        if len(parts) == 1:
+            print_console(f"Max tokens: {args.max_tokens}")
+        else:
+            try:
+                args.max_tokens = max(16, min(max_seq_len, int(parts[1])))
+                print_console(f"Max tokens set to {args.max_tokens}")
+            except ValueError:
+                print_console("Invalid max tokens.")
+        continue
+
+    # Sandbox slash commands: /run, /bash, /subnet, /sandbox
+    if user_input.lower().startswith(('/run ', '/python ', '/py ')):
+        code = user_input.split(maxsplit=1)[1] if len(user_input.split(maxsplit=1)) > 1 else ""
+        if code:
+            print_console(f"{C.gray}Running Python in sandbox...{C.reset}")
+            res = sandbox.execute_python(code)
+            if res["success"]:
+                if res["stdout"]:
+                    print(f"{C.green}{res['stdout']}{C.reset}")
+                else:
+                    print_console(f"{C.gray}(no output){C.reset}")
+            else:
+                print(f"{C.orange}Error ({res['returncode']}):{C.reset}\n{res['stderr']}")
+            print_console(f"{C.gray}{res['duration_sec']}s{C.reset}")
+        else:
+            print_console("Usage: /run <python code>")
+        continue
+
+    if user_input.lower().startswith(('/bash ', '/shell ', '/cmd ')):
+        command = user_input.split(maxsplit=1)[1] if len(user_input.split(maxsplit=1)) > 1 else ""
+        if command:
+            print_console(f"{C.gray}Running command in sandbox...{C.reset}")
+            res = sandbox.execute_bash(command)
+            if res["success"]:
+                if res["stdout"]:
+                    print(f"{C.green}{res['stdout']}{C.reset}")
+                else:
+                    print_console(f"{C.gray}(no output){C.reset}")
+            else:
+                print(f"{C.orange}Error ({res['returncode']}):{C.reset}\n{res['stderr']}")
+            print_console(f"{C.gray}{res['duration_sec']}s{C.reset}")
+        else:
+            print_console("Usage: /bash <command>")
+        continue
+
+    if user_input.lower().startswith('/subnet'):
+        parts = user_input.split(maxsplit=1)
+        if len(parts) > 1:
+            import json as _json
+            res = sandbox.execute_subnet(parts[1].strip())
+            print(f"{C.green}{_json.dumps(res, indent=2)}{C.reset}")
+        else:
+            print_console("Usage: /subnet <cidr> (e.g. /subnet 192.168.10.0/26)")
+        continue
+
+    if user_input.lower().startswith('/subagent'):
+        parts = user_input.split(maxsplit=2)
+        if len(parts) >= 3:
+            role = parts[1]
+            task = parts[2]
+            print_console(f"{C.gray}Delegating task to subagent [{role}]...{C.reset}")
+            import json as _json
+            res = sandbox.execute_subagent(role, task)
+            print(f"{C.green}{_json.dumps(res, indent=2)}{C.reset}")
+        else:
+            print_console("Usage: /subagent <soc_analyst|code_auditor|threat_intel|recon_specialist|sysadmin|math_reasoner> <task description>")
+        continue
+
+    if user_input.lower().startswith(('/ls', '/files')):
+        files = sandbox.list_files()
+        import json as _json
+        print(f"{C.green}{_json.dumps(files, indent=2)}{C.reset}")
+        continue
+
+    if user_input.lower().startswith('/grep'):
+        parts = user_input.split(maxsplit=1)
+        if len(parts) > 1:
+            import json as _json
+            res = sandbox.grep_files(parts[1].strip())
+            print(f"{C.green}{_json.dumps(res, indent=2)}{C.reset}")
+        else:
+            print_console("Usage: /grep <regex_pattern>")
+        continue
+
+    if user_input.lower().startswith('/sandbox'):
+        parts = user_input.split()
+        if len(parts) == 1 or parts[1] == 'status':
+            mode = 'Docker' if sandbox.use_docker else 'Local subprocess'
+            print_console(f"Sandbox mode: {C.bold}{mode}{C.reset}")
+            print_console(f"Workspace: {C.bold}{sandbox.workspace_dir}{C.reset}")
+            print_console(f"Subagents active: {C.bold}{len(sandbox.subagents)}{C.reset}")
+        elif parts[1] == 'dir' and len(parts) > 2:
+            sandbox.workspace_dir = parts[2]
+            os.makedirs(sandbox.workspace_dir, exist_ok=True)
+            print_console(f"Sandbox workspace set to {C.bold}{sandbox.workspace_dir}{C.reset}")
+        elif parts[1] == 'docker':
+            sandbox.use_docker = not sandbox.use_docker
+            print_console(f"Docker sandbox {'enabled' if sandbox.use_docker else 'disabled'}")
+        else:
+            print_console("Usage: /sandbox [status|dir <path>|docker]")
+        continue
+
     if not user_input:
         continue
 
     # Add User message to the conversation and history
+    # If this is the first turn and a system prompt is active, prepend it
+    is_first_turn = (len(chat_history) == 0)
+    if is_first_turn and active_system_prompt:
+        turn_prompt_text = f"{active_system_prompt}\n\n{user_input}"
+    else:
+        turn_prompt_text = user_input
+
+    user_tokens = tokenizer.encode(turn_prompt_text)
+    input_tokens_count = len(user_tokens)
+    
+    # Calculate context before generation
+    curr_ctx = len(conversation_tokens) + input_tokens_count + 3 # + user_start, user_end, assistant_start
+    ctx_pct = (curr_ctx / max_seq_len) * 100
+    print(f"{C.gray}  ↳ Input: {C.bold}{C.cyan}{input_tokens_count}{C.reset}{C.gray} tokens │ Context: {curr_ctx:,}/{max_seq_len:,} ({ctx_pct:.1f}%){C.reset}")
+
     conversation_tokens.append(user_start)
-    conversation_tokens.extend(tokenizer.encode(user_input))
+    conversation_tokens.extend(user_tokens)
     conversation_tokens.append(user_end)
     chat_history.append({"role": "user", "content": user_input})
 
@@ -324,24 +515,51 @@ while True:
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
         "top_k": args.top_k,
+        "repetition_penalty": args.repetition_penalty,
     }
     response_tokens = []
     response_text_list = []
     print_assistant_header()
     renderer = CodeBlockState()
+    t_start = time.time()
     try:
+        in_tool_disp = False
+        in_output_disp = False
         for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
             token = token_column[0] # pop the batch dimension (num_samples=1)
             response_tokens.append(token)
             if token == assistant_end:
                 break
+            if token in (tool_start, calc_start):
+                in_tool_disp = True
+                print(f"\n{C.purple}╭─ {C.teal}{C.bold}⚙ Tool Call{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 18)}╮{C.reset}\n{C.purple}│{C.reset} {C.cyan}", end="", flush=True)
+                continue
+            if token in (tool_end, calc_end):
+                in_tool_disp = False
+                print(f"{C.reset}\n{C.purple}├─ {C.teal}{C.bold}Sandbox Result{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 21)}┤{C.reset}\n", end="", flush=True)
+                continue
+            if token == output_start:
+                in_output_disp = True
+                print(f"{C.purple}│{C.reset} {C.green}", end="", flush=True)
+                continue
+            if token == output_end:
+                in_output_disp = False
+                print(f"{C.reset}\n{C.purple}╰{'─' * max(10, TERM_WIDTH - 2)}╯{C.reset}\n", end="", flush=True)
+                continue
+
             token_text = tokenizer.decode([token])
             response_text_list.append(token_text)
-            print(renderer.feed(token_text), end="", flush=True)
+            if in_tool_disp:
+                print(f"{C.cyan}{token_text}{C.reset}", end="", flush=True)
+            elif in_output_disp:
+                print(f"{C.green}{token_text}{C.reset}", end="", flush=True)
+            else:
+                print(renderer.feed(token_text), end="", flush=True)
     except KeyboardInterrupt:
         print(f"\n{C.orange}[Generation interrupted by user]{C.reset}")
     finally:
         print(renderer.flush(), end="", flush=True)
+    t_end = time.time()
     print_footer()
 
     # Accumulate full text for the chat history
@@ -353,6 +571,14 @@ while True:
     if not response_tokens or response_tokens[-1] != assistant_end:
         response_tokens.append(assistant_end)
     conversation_tokens.extend(response_tokens)
+
+    # Show output token stats
+    out_tokens_count = len(response_tokens)
+    elapsed = max(0.001, t_end - t_start)
+    tok_per_sec = out_tokens_count / elapsed
+    total_ctx = len(conversation_tokens)
+    total_pct = (total_ctx / max_seq_len) * 100
+    print(f"{C.gray}  ↳ Output: {C.bold}{C.cyan}{out_tokens_count}{C.reset}{C.gray} tokens ({tok_per_sec:.1f} tok/s) │ Total Context: {total_ctx:,}/{max_seq_len:,} ({total_pct:.1f}%){C.reset}\n")
 
     # In the prompt mode, we only want a single response and exit
     if args.prompt:

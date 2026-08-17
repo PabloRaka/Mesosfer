@@ -42,9 +42,9 @@ parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('d
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # Model loading
-parser.add_argument("--checkpoint-source", type=str, default="base", choices=["base", "sft"], help="checkpoint source to fine-tune from: base|sft")
-parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
-parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
+parser.add_argument("-i", "--checkpoint-source", "--source", type=str, default="base", choices=["base", "sft"], help="checkpoint source to fine-tune from: base|sft")
+parser.add_argument("-g", "--model-tag", "--depth", type=str, default=None, help="model tag or depth to load from")
+parser.add_argument("-s", "--model-step", "--step", type=int, default=None, help="model step to load from")
 parser.add_argument("--load-optimizer", type=int, default=1, help="warm-start optimizer from pretrained checkpoint (0=no, 1=yes)")
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)")
@@ -53,6 +53,7 @@ parser.add_argument("--max-seq-len", type=int, default=None, help="max context l
 parser.add_argument("--device-batch-size", type=int, default=None, help="per-device batch size (default: inherit from pretrain)")
 parser.add_argument("--total-batch-size", type=int, default=None, help="total batch size in tokens (default: inherit from pretrain)")
 # Optimization (default: inherit from pretrained checkpoint)
+parser.add_argument("--learning-rate", "--lr", type=float, default=None, help="override learning rate (AdamW/Muon)")
 parser.add_argument("--embedding-lr", type=float, default=None, help="learning rate for embedding parameters (Adam) (default: inherit from pretrain)")
 parser.add_argument("--unembedding-lr", type=float, default=None, help="learning rate for unembedding parameters (Adam) (default: inherit from pretrain)")
 parser.add_argument("--matrix-lr", type=float, default=None, help="learning rate for matrix parameters (Muon) (default: inherit from pretrain)")
@@ -73,41 +74,67 @@ parser.add_argument("--chatcore-tasks", type=str, default=None,
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
 # Cybersecurity SFT data mixture
-parser.add_argument("--cyber-defensive-epochs", type=int, default=1, help="epochs of cyber_defensive_conversations (5K rows × language)")
-parser.add_argument("--cloud-security-epochs", type=int, default=20, help="epochs of cloud_security_sft (6 rows × language, oversampled)")
-parser.add_argument("--multi-turn-soc-epochs", type=int, default=30, help="epochs of multi_turn_soc_sft (4 rows, oversampled)")
-parser.add_argument("--tool-oriented-epochs", type=int, default=20, help="epochs of tool_oriented_cyber_sft (8 rows, oversampled)")
-parser.add_argument("--mythos-epochs", type=int, default=4, help="epochs of mythos_combined_sft (110 rows × language)")
-parser.add_argument("--mythos-tool-calling-epochs", type=int, default=4, help="epochs of mythos_tool_calling (110 rows × language, native tool format)")
-parser.add_argument("--mesosfer-validation-epochs", type=int, default=2, help="epochs of mesosfer_validation_conversations (300 rows × language)")
-parser.add_argument("--gemini-teacher-epochs", type=int, default=2, help="epochs of gemini_teacher_conversations (373 rows)")
+parser.add_argument("--cyber-defensive-epochs", type=int, default=1, help="epochs of cyber_defensive_conversations (96 rows x language, deduped from 5K)")
+parser.add_argument("--cloud-security-epochs", type=int, default=2, help="epochs of cloud_security_sft (6 rows x language, oversampled)")
+parser.add_argument("--multi-turn-soc-epochs", type=int, default=0, help="epochs of multi_turn_soc_sft (DISABLED: turns are mislabelled, no real assistant answers)")
+parser.add_argument("--tool-oriented-epochs", type=int, default=1, help="epochs of tool_oriented_cyber_sft (8 rows, oversampled)")
+parser.add_argument("--mythos-epochs", type=int, default=0, help="epochs of mythos_combined_sft (0=disable paranoid forensic narrative)")
+parser.add_argument("--mythos-tool-calling-epochs", type=int, default=0, help="epochs of mythos_tool_calling (0=disable fake compromise scenarios)")
+parser.add_argument("--mesosfer-validation-epochs", type=int, default=0, help="epochs of mesosfer_validation_conversations (0 = held-out eval set, do not train)")
+parser.add_argument("--gemini-teacher-epochs", type=int, default=4, help="epochs of gemini_teacher_conversations (373 rows)")
+parser.add_argument("--chat-history-epochs", type=int, default=4, help="epochs of chat_history_distilled_sft (pair-programming & troubleshooting traces)")
+parser.add_argument("--real-agentic-epochs", type=int, default=2, help="epochs of real_agentic_tool_calling_sft (real-world tool traces in Mesosfer format)")
 parser.add_argument("--primus-instruct-epochs", type=int, default=1, help="epochs of Primus-Instruct (~100K rows, gated, 0=skip)")
 parser.add_argument("--primus-reasoning-epochs", type=int, default=1, help="epochs of Primus-Reasoning (~50K rows, gated, 0=skip)")
-parser.add_argument("--cybernative-vuln-epochs", type=int, default=3, help="epochs of CyberNative vuln DPO (~4.6K rows)")
+parser.add_argument("--cybernative-vuln-epochs", type=int, default=2, help="epochs of CyberNative vuln DPO (~4.6K rows)")
 parser.add_argument("--openhermes-epochs", type=int, default=1, help="epochs of OpenHermes-2.5 (50K rows, 0=skip)")
 parser.add_argument("--ultrachat-epochs", type=int, default=1, help="epochs of UltraChat 200K (100K rows, 0=skip)")
 parser.add_argument("--trendyol-cyber-epochs", type=int, default=1, help="epochs of Trendyol Cybersecurity Instruction (53K rows, 0=skip)")
 parser.add_argument("--tiamz-cybersec-epochs", type=int, default=2, help="epochs of Tiamz cybersecurity Q&A (12K rows)")
-parser.add_argument("--alpaca-indonesian-epochs", type=int, default=1, help="epochs of Alpaca Cleaned Indonesian instruction dataset (~52K rows, 0=skip)")
-parser.add_argument("--competition-math-epochs", type=int, default=2, help="epochs of competition_math_sft (~10K rows, 0=skip)")
+parser.add_argument("--alpaca-indonesian-epochs", type=int, default=2, help="epochs of Alpaca Cleaned Indonesian instruction dataset (~52K rows, 0=skip)")
+parser.add_argument("--alpaca-gpt4-indonesian-epochs", type=int, default=2, help="epochs of Alpaca GPT-4 Indonesian dataset (~52K rows, 0=skip)")
 parser.add_argument("--magpie-reasoning-epochs", type=int, default=1, help="epochs of magpie_reasoning_sft (~50K rows, 0=skip)")
 parser.add_argument("--open-thoughts-epochs", type=int, default=1, help="epochs of open_thoughts_sft (~50K rows, 0=skip)")
+parser.add_argument("--hermes-func-calling-epochs", type=int, default=3, help="epochs of Hermes function calling (20K rows, ungated tool-calling)")
+parser.add_argument("--hermes-glaive-func-calling-epochs", type=int, default=1, help="epochs of Glaive function calling via Hermes (20K rows)")
+parser.add_argument("--kimi-k3-traces-epochs", type=int, default=4, help="epochs of Kimi K3 agentic coding/debugging traces (~4K rows)")
+parser.add_argument("--cot-collection-epochs", type=int, default=1, help="epochs of CoT Collection chain-of-thought rationales (50K rows)")
+parser.add_argument("--qyrou-reasoning-epochs", type=int, default=1, help="epochs of Qyrou reasoning corpus with thought traces (50K rows)")
 parser.add_argument("--nist-cybersec-epochs", type=int, default=1, help="epochs of nist_cybersec_sft (~50K rows, 0=skip)")
 parser.add_argument("--fenrir-v2-epochs", type=int, default=1, help="epochs of fenrir_v2_sft (~99K rows, 0=skip)")
 parser.add_argument("--code-feedback-epochs", type=int, default=1, help="epochs of code_feedback_sft (~50K rows, 0=skip)")
 parser.add_argument("--numinamath-cot-epochs", type=int, default=1, help="epochs of numinamath_cot_sft (~50K rows, 0=skip)")
 parser.add_argument("--aquilax-security-reasoning-epochs", type=int, default=2, help="epochs of aquilax_security_reasoning_sft cybersec CoT (~18K rows, gated, 0=skip)")
-parser.add_argument("--xlam-function-calling-epochs", type=int, default=1, help="epochs of xlam_function_calling_sft generic tool-calling (~20K rows, gated, 0=skip)")
+parser.add_argument("--xlam-function-calling-epochs", type=int, default=2, help="epochs of xlam_function_calling_sft generic tool-calling (~20K rows, gated, 0=skip)")
 parser.add_argument("--include-english-sft", type=int, default=1, help="1 = include _en variants of bilingual cybersec datasets, 0 = ID only")
 parser.add_argument("--disable-cybersec-sft", action="store_true", help="disable all cybersecurity SFT datasets (for ablation)")
 parser.add_argument("--rules-epochs", type=int, default=4, help="epochs of rules.jsonl (behavioral/safety/format rules)")
-parser.add_argument("--tool-calling-epochs", type=int, default=15, help="epochs of tool_calling_conversations_en.jsonl (tool-use with special tokens)")
+parser.add_argument("--tool-calling-epochs", type=int, default=24, help="epochs of tool_calling_conversations_en (calc/tool/subagent parts)")
 parser.add_argument("--instruction-following-epochs", type=int, default=4, help="epochs of instruction_following_conversations_en.jsonl (format/count/conciseness polish)")
 parser.add_argument("--instruction-polish-only", action="store_true", help="train only on local identity/rules/instruction-following polish data")
 parser.add_argument("--safety-artifact-epochs", type=int, default=4, help="epochs of safety_artifact_conversations_en.jsonl (artifact-vs-attack boundary)")
 parser.add_argument("--safety-artifact-only", action="store_true", help="train only on local identity/rules/safety-artifact boundary data")
+parser.add_argument("--local-sft-only", action="store_true", help="train only on local SFT datasets (skip downloading SmolTalk, MMLU, GSM8K, and Spelling tasks)")
+parser.add_argument("--targeted-domain-sft", action="store_true", help="train specifically on cybersecurity, tool-use, code feedback, and CoT reasoning without generic chatter")
 parser.add_argument("--save-every", type=int, default=200, help="save intermediate checkpoint every N steps (-1 = only at end)")
 args = parser.parse_args()
+
+if args.targeted_domain_sft:
+    args.local_sft_only = True
+    args.ultrachat_epochs = 0
+    args.openhermes_epochs = 0
+    args.alpaca_indonesian_epochs = 0
+    args.cyber_defensive_epochs = 8
+    args.cloud_security_epochs = 8
+    args.mythos_epochs = 8
+    args.mythos_tool_calling_epochs = 8
+    args.tool_calling_epochs = 12
+    args.tool_oriented_epochs = 8
+    args.gemini_teacher_epochs = 6
+    args.rules_epochs = 8
+    args.instruction_following_epochs = 8
+    args.safety_artifact_epochs = 6
+
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
 
@@ -212,10 +239,16 @@ scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
-# Override the initial learning rate as a fraction of the base learning rate
-for group in optimizer.param_groups:
-    group["lr"] = group["lr"] * args.init_lr_frac
-    group["initial_lr"] = group["lr"]
+# Override the initial learning rate as a fraction of the base learning rate or explicit --learning-rate
+if args.learning_rate is not None:
+    for group in optimizer.param_groups:
+        group["lr"] = args.learning_rate
+        group["initial_lr"] = args.learning_rate
+    print0(f"Overriding optimizer learning rate with --learning-rate={args.learning_rate}")
+else:
+    for group in optimizer.param_groups:
+        group["lr"] = group["lr"] * args.init_lr_frac
+        group["initial_lr"] = group["lr"]
 
 # SFT data mixture and DataLoader
 sft_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "sft"))
@@ -233,6 +266,12 @@ if args.instruction_polish_only or args.safety_artifact_only:
     ]
     mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
     print0(f"{mode_name} mode: skipping broad SmolTalk/MMLU/GSM8K/spelling training tasks")
+elif args.local_sft_only:
+    train_tasks = [
+        CustomJSON(filepath=identity_conversations_filepath),
+        CustomJSON(filepath=identity_conversations_filepath),
+    ]
+    print0("Local SFT mode: training only on local SFT data mixture (skipping SmolTalk/MMLU/GSM8K/Spelling)")
 else:
     train_tasks = [
         SmolTalk(split="train"), # 460K rows of general conversations
@@ -292,6 +331,8 @@ elif not args.disable_cybersec_sft:
         mythos_tool_calling_epochs=args.mythos_tool_calling_epochs,
         mesosfer_validation_epochs=args.mesosfer_validation_epochs,
         gemini_teacher_epochs=args.gemini_teacher_epochs,
+        chat_history_epochs=args.chat_history_epochs,
+        real_agentic_epochs=args.real_agentic_epochs,
         primus_instruct_epochs=args.primus_instruct_epochs,
         primus_reasoning_epochs=args.primus_reasoning_epochs,
         cybernative_vuln_epochs=args.cybernative_vuln_epochs,
@@ -300,7 +341,7 @@ elif not args.disable_cybersec_sft:
         trendyol_cyber_epochs=args.trendyol_cyber_epochs,
         tiamz_cybersec_epochs=args.tiamz_cybersec_epochs,
         alpaca_indonesian_epochs=args.alpaca_indonesian_epochs,
-        competition_math_epochs=args.competition_math_epochs,
+        alpaca_gpt4_indonesian_epochs=args.alpaca_gpt4_indonesian_epochs,
         magpie_reasoning_epochs=args.magpie_reasoning_epochs,
         open_thoughts_epochs=args.open_thoughts_epochs,
         nist_cybersec_epochs=args.nist_cybersec_epochs,
@@ -318,12 +359,26 @@ else:
     print0("Cybersec SFT disabled via --disable-cybersec-sft")
 
 train_dataset = TaskMixture(train_tasks)
-print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs})")
-val_dataset = TaskMixture([
-    SmolTalk(split="test"), # 24K rows in test set
-    MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
-    GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
-]) # total: 24K + 5.2K + 0.42K ~= 29.6K rows
+if args.local_sft_only:
+    print0(f"Training mixture (local SFT): {len(train_dataset):,} rows")
+    val_tasks = []
+    val_id = os.path.join(sft_dir, "mesosfer_validation_conversations.jsonl")
+    val_en = os.path.join(sft_dir, "mesosfer_validation_conversations_en.jsonl")
+    if os.path.exists(val_id):
+        val_tasks.append(CustomJSON(filepath=val_id))
+    if os.path.exists(val_en):
+        val_tasks.append(CustomJSON(filepath=val_en))
+    if not val_tasks:
+        val_tasks.append(CustomJSON(filepath=identity_conversations_filepath))
+    val_dataset = TaskMixture(val_tasks)
+    print0(f"Validation mixture (local): {len(val_dataset):,} rows")
+else:
+    print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x{args.mmlu_epochs}, GSM8K x{args.gsm8k_epochs})")
+    val_dataset = TaskMixture([
+        SmolTalk(split="test"), # 24K rows in test set
+        MMLU(subset="all", split="test", stop=5200), # 14K rows in test set, use only 5.2K to match the train ratios
+        GSM8K(subset="main", split="test", stop=420), # 1.32K rows in test set, use only 420 to match the train ratios
+    ]) # total: 24K + 5.2K + 0.42K ~= 29.6K rows
 # DataLoader is defined here, it emits inputs, targets : 2D tensors of shape (device_batch_size, max_seq_len)
 # A big problem is that we don't know the final num_iterations in advance. So we create
 # these two global variables and update them from within the data generator.
@@ -476,6 +531,8 @@ def get_muon_momentum(it):
 # Training loop
 x, y = next(train_loader) # prefetch the very first batch of data
 min_val_bpb = float("inf")
+val_bpb = None
+val_loss = None
 smooth_train_loss = 0 # EMA of training loss
 ema_beta = 0.9 # EMA decay factor
 total_training_time = 0 # total wall-clock time of training

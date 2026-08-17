@@ -14,9 +14,9 @@ stages of **mesosfer**, kept in sync with the source of truth in code:
 
 | Mode                                             | Scaling Params | Ratio | Tokens Needed | Tokens Available | Status              |
 | :------------------------------------------------- | :--------------- | :------ | :-------------- | :----------------- | :-------------------- |
-| Speedrun (`--target-param-data-ratio=10`)        | ~6.8B          | 10×  | ~68B          | ~100B            | ✅ surplus          |
-| Recommended (`--target-param-data-ratio=15`)     | ~6.8B          | 15×  | ~103B         | ~100B            | ✅ ~covered (marginal) |
-| Compute-optimal (`--target-param-data-ratio=18`) | ~6.8B          | 18×  | ~123B         | ~100B            | ⚠️ under            |
+| Speedrun (`--target-param-data-ratio=10`)        | ~6.8B          | 10×  | ~68B          | ~103B            | ✅ surplus          |
+| Recommended (`--target-param-data-ratio=15`)     | ~6.8B          | 15×  | ~103B         | ~103B            | ✅ ~covered (marginal) |
+| Compute-optimal (`--target-param-data-ratio=18`) | ~6.8B          | 18×  | ~123B         | ~103B            | ⚠️ under            |
 
 > **Depth 32 config:** `n_embd = 32 × 128 = 4096`, **96K vocab**, ~13.7B total params (legacy VE; ~9.3B with `--ve-layers=4`), ~6.8B scaling params (transformer matrices + lm_head, excl. embeddings).
 > Recommended: `--depth=32 --target-param-data-ratio=10` (~68B, comfortable surplus) or `=15` (~103B, marginal). Use `--ve-layers=4 --grad-checkpoint` to cut memory.
@@ -29,8 +29,10 @@ stages of **mesosfer**, kept in sync with the source of truth in code:
 | Cybersecurity    | ~37.1B      | ~37%  |
 | Code             | ~30.1B      | ~30%  |
 | Reasoning / Math | ~21.0B      | ~21%  |
-| General          | ~12.0B      | ~12%  |
-| **Total**        | **~100.2B** | 100%  |
+| General          | ~15.2B      | ~15%  |
+| **Total**        | **~103.4B** | 100%  |
+
+> General includes ~3.2B Indonesian (`fineweb2_id`, `wikipedia_id`); the rest is English.
 
 ---
 
@@ -87,6 +89,9 @@ bound on volume per source.
 | `threat_report_pdfs`        | Cybersecurity | 1.5    | 90M        | pdf_manifest                                | Vendor threat report PDFs.               |
 | `splunk_rules`              | Cybersecurity | 1.5    | 60M        | github_repo                                 | Splunk security detections.              |
 | `zeek_scripts`              | Cybersecurity | 1.5    | 40M        | github_repo                                 | Zeek scripts and packages.               |
+| `code_powershell`           | Code          | 1.6    | 800M       | `bigcode/the-stack-dedup`                   | PowerShell — Windows admin + offensive.  |
+| `code_assembly`             | Code          | 1.6    | 800M       | `bigcode/the-stack-dedup`                   | Assembly — reverse engineering.          |
+| `code_sql`                  | Code          | 1.5    | 1.5B       | `bigcode/the-stack-dedup`                   | SQL — injection context.                 |
 | `secure_code_python`        | Code          | 1.4    | 4.0B       | `bigcode/the-stack-dedup`                   | Python (dedup).                          |
 | `secure_code_c`             | Code          | 1.4    | 3.0B       | `bigcode/the-stack-dedup`                   | C (dedup).                               |
 | `secure_code_shell`         | Code          | 1.4    | 2.0B       | `bigcode/the-stack-dedup`                   | Shell (dedup).                           |
@@ -98,13 +103,24 @@ bound on volume per source.
 | `secure_code_cpp`           | Code          | 1.2    | 3.0B       | `bigcode/the-stack-dedup`                   | C++ (dedup).                             |
 | `secure_code_rust`          | Code          | 1.2    | 2.4B       | `bigcode/the-stack-dedup`                   | Rust (dedup).                            |
 | `secure_code_go`            | Code          | 1.2    | 2.4B       | `bigcode/the-stack-dedup`                   | Go (dedup).                              |
+| `code_csharp`               | Code          | 1.2    | 2.0B       | `bigcode/the-stack-dedup`                   | C# — .NET applications and tooling.      |
+| `code_jupyter`              | Code          | 1.0    | 2.0B       | `bigcode/the-stack-dedup`                   | Notebooks — machine learning / AI code.  |
 | `nemotron_cc_math`          | Reasoning     | 1.0    | 18.0B      | `nvidia/Nemotron-CC-Math-v1` (`4plus`)      | High-quality math/reasoning corpus.      |
 | `finemath`                  | Reasoning     | 0.9    | 3.0B       | `HuggingFaceTB/finemath` (`finemath-4plus`) | Math reasoning.                          |
 | `fineweb_edu`               | General       | 0.7    | 4.0B       | `HuggingFaceFW/fineweb-edu` (`sample-10BT`) | Educational web content.                 |
 | `climbmix`                  | General       | 0.6    | 5.0B       | `karpathy/climbmix-400b-shuffle`            | General pretraining, suppressed.         |
 | `wikipedia`                 | General       | 0.5    | 3.0B       | `wikimedia/wikipedia` (`20231101.en`)       | English Wikipedia, suppressed.           |
+| `fineweb2_id`               | General       | 0.6    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
+| `wikipedia_id`              | General       | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
 
-> **46 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
+> **48 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
+
+> 🇮🇩 **Indonesian in pretraining:** `fineweb2_id` + `wikipedia_id` contribute ~3.2B tokens (~3% of the
+> mix). This is deliberately small — it exists so the 96K tokenizer learns real Indonesian sub-words and
+> the base model has a language foundation to build on. The Indonesian SFT sets (Section 3) sit on top of
+> it; SFT alone cannot teach a language the base model never saw during pretraining. Weights are kept at
+> the general-knowledge tier (0.5–0.6) because weight controls how often a domain appears in mixed
+> shards, and bursty language switching is a known loss-spike source.
 
 > ⚠️ **Loss-spike prevention:** Raw logs (`.log`, `.xml`, `.json`) are converted to natural-language
 > narratives by `convert_logs_to_nl.py` before pretraining:
@@ -156,7 +172,6 @@ Wired into the training mixture via `tasks/cybersec_sft.py` (default epochs show
 | `trendyol_cyber_sft`         | `Trendyol/...-Cybersecurity-Instruction-Tuning-Dataset` | 53K      | 1              | Defensive cybersec Q&A.                                                                                     |
 | `tiamz_cybersec`             | `Tiamz/cybersecurity-instruction-dataset`               | 15K      | 2              | Cybersec instruction Q&A.                                                                                   |
 | `alpaca_indonesian`          | `ilhamfadheel/alpaca-cleaned-indonesian`                | 55K      | 1              | Indonesian instruction-following.                                                                           |
-| `competition_math_sft`       | `hendrycks/competition_math`                            | 10K      | 2              | Math with step-by-step solutions.                                                                           |
 | `magpie_reasoning_sft`       | `Magpie-Align/Magpie-Reasoning-V2`                      | 50K      | 1              | DeepSeek-R1-Llama reasoning.                                                                                |
 | `open_thoughts_sft`          | `open-thoughts/OpenThoughts-114k`                       | 50K      | 1              | Reasoning / CoT conversations.                                                                              |
 | `nist_cybersec`              | `ethanolivertroy/nist-cybersecurity-training`           | 50K      | 1              | NIST cybersec training conversations.                                                                       |
@@ -165,6 +180,11 @@ Wired into the training mixture via `tasks/cybersec_sft.py` (default epochs show
 | `numinamath_cot`             | `AI-MO/NuminaMath-CoT`                                  | 50K      | 1              | Competition math with chain-of-thought.                                                                     |
 | `aquilax_security_reasoning` | `tuandunghcmut/AquilaX-AI-security-assistant-reasoning` | 18.3K    | 2              | Cybersec vuln-analysis reasoning (CoT). Reasoning template stripped of Llama-3 reserved tokens (**gated**). |
 | `xlam_function_calling`      | `Salesforce/xlam-function-calling-60k`                  | 20K      | 1              | Generic named tool-calling (APIGen, cc-by-4.0); rendered as `<\|tool_start\|>` JSON `{name, arguments}` — shell, scanners, SQL, HTTP (**gated**). |
+| `hermes_func_calling`        | `NousResearch/hermes-function-calling-v1` (`func_calling`) | 20K   | 2              | Multi-turn tool calling, apache-2.0. Ungated counterpart to xLAM — without `HF_TOKEN` this is the main external tool-calling source. `<tool_call>` XML → native tool/tool_output parts. |
+| `hermes_glaive_func_calling` | `NousResearch/hermes-function-calling-v1` (`glaive_func_calling`) | 20K | 1     | Glaive function calling, already cleaned into ShareGPT turns. Preferred over raw `glaiveai/glaive-function-calling-v2`, which needs brittle text parsing. |
+| `kimi_k3_traces`             | `greghavens/kimi-k3-coding-and-debugging-traces`        | 4K       | 4              | Agentic coding/debugging trajectories with multi-step tool use and reasoning (cc-by-4.0). OpenAI-style `tool_calls`; `arguments` JSON string decoded to dict so `parse_tool_call` accepts it. |
+| `cot_collection`             | `kaist-ai/CoT-Collection` (`en`)                        | 50K      | 1              | Chain-of-thought rationales across many NLP tasks (cc-by-4.0). Repo ships only a loading script, so it is read via `revision=refs/convert/parquet`. |
+| `qyrou_reasoning`            | `Qyrou/reasoning-corpus-4K-5M-v1`                       | 50K      | 1              | Reasoning distilled from frontier models, apache-2.0. Has an explicit `thought_trace` column, so no thinking-tag parsing needed. |
 
 > All external datasets above are wired into the default training mixture
 > (`tasks/cybersec_sft.py` → `build_cybersec_sft_tasks`, with CLI epoch flags in
@@ -256,13 +276,22 @@ dependency on Llama-3 / OpenAI tool formats):
 
 | Token pair | Meaning | Supervised? |
 | :--- | :--- | :--- |
-| `<\|python_start\|>` … `<\|python_end\|>` | Built-in Python REPL/calculator (executed by the engine at inference) | yes |
+| `<\|calc_start\|>` … `<\|calc_end\|>` | Inline expression evaluator — arithmetic and simple string ops, run by the engine at inference (not a Python REPL) | yes |
 | `<\|tool_start\|>` … `<\|tool_end\|>` | Generic named tool call. Payload is JSON `{"name": ..., "arguments": {...}}` — covers shell, network scanners, SQL, HTTP, etc. | yes |
 | `<\|output_start\|>` … `<\|output_end\|>` | Tool / REPL result returned from the environment | no (not supervised) |
 
 Sources:
 - **Local** (`data/sft/`): `tool_calling_conversations_en.jsonl`, `mythos_tool_calling*.jsonl`, `tool_oriented_cyber_sft.jsonl` (generated by `dev/` scripts).
-- **External** (HF): `xlam_function_calling` (Section 3B), converted to the generic `<|tool_start|>` format by `convert_function_calling` in `download_sft_data.py`.
+- **External** (HF), all converted to the generic `<|tool_start|>` format in `download_sft_data.py`:
+  `xlam_function_calling` via `convert_function_calling` (**gated**);
+  `hermes_func_calling` and `hermes_glaive_func_calling` via `convert_sharegpt_tool_calls` (`<tool_call>` XML tags);
+  `kimi_k3_traces` via `convert_openai_tool_calls` (OpenAI `tool_calls`, multi-step agentic).
+  The Hermes and Kimi sets are ungated, so tool-calling data is available without `HF_TOKEN`.
+
+> Every converter emits `arguments` as a JSON **object**, because
+> `mesosfer.eval.harness.parse_tool_call` rejects a non-dict `arguments` and turns the
+> call into an error. Source datasets that use a string or a list (raw Glaive, the old
+> `mythos_combined` payloads) are normalised before being written.
 
 > The generic `<|tool_start|>` payload carries the tool name, so a single token
 > pair supports every tool family. At inference the model only *emits* tool calls;
