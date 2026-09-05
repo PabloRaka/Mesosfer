@@ -22,18 +22,22 @@ import pyarrow.parquet as pq
 from mesosfer.utils.common import get_dist_info
 from mesosfer.data.dataset import list_parquet_files, split_parquet_paths, strip_notebook_blobs
 
-def _document_batches(split, resume_state_dict, tokenizer_batch_size):
+def _document_batches(split, resume_state_dict, tokenizer_batch_size, data_dir=None):
     """
     Infinite iterator over document batches (list of text strings) from parquet files.
 
     Handles DDP sharding and approximate resume. Each yield is (text_batch, (pq_idx, rg_idx, epoch))
     where text_batch is a list of document strings, indices track position for resumption,
     and epoch counts how many times we've cycled through the dataset (starts at 1).
+
+    data_dir: if given, read only this single directory (no auxiliary merge) - see
+    mesosfer.data.dataset.list_parquet_files. None (default) preserves the normal
+    merge-everything behavior.
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
     warn_on_legacy = ddp_rank == 0 and split == "train" # rank 0 on train split will warn on legacy
-    parquet_paths = list_parquet_files(warn_on_legacy=warn_on_legacy)
+    parquet_paths = list_parquet_files(data_dir=data_dir, warn_on_legacy=warn_on_legacy)
     assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"
     # Shared with tok_train's reader so both see the same shuffled order. pq_idx in the
     # resume state indexes into this permutation, which is stable for a fixed shard count.
@@ -77,7 +81,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     tokenizer, B, T, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
-    buffer_size=1000
+    buffer_size=1000, data_dir=None
 ):
     """
     BOS-aligned dataloader with Best-Fit Cropping.
@@ -98,7 +102,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     assert split in ["train", "val"], "split must be 'train' or 'val'"
 
     row_capacity = T + 1
-    batches = _document_batches(split, resume_state_dict, tokenizer_batch_size)
+    batches = _document_batches(split, resume_state_dict, tokenizer_batch_size, data_dir=data_dir)
     bos_token = tokenizer.get_bos_token_id()
     doc_buffer = []
     pq_idx, rg_idx, epoch = 0, 0, 1

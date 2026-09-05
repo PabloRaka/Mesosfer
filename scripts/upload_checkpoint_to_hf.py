@@ -648,6 +648,9 @@ def main():
                         help="HuggingFace repo ID (default: HF_REPO env var, e.g. johndoe/mesosfer-checkpoints)")
     parser.add_argument("--base-dir", type=str, default=None,
                         help="Override mesosfer cache dir (default: ~/.cache/mesosfer)")
+    parser.add_argument("--public", action="store_true",
+                        help="Create the repo public if it does not exist yet (default: private). "
+                             "Never changes an existing repo's visibility.")
 
     parser.add_argument("--public", action="store_true", default=False,
                         help="Make the HuggingFace repository public")

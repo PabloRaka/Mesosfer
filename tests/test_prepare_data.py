@@ -1,6 +1,8 @@
 import sys
 from dataclasses import FrozenInstanceError
 
+import pytest
+
 from scripts.data import prepare_data
 
 
@@ -96,11 +98,143 @@ def test_climbmix_keeps_general_text_without_security_keywords():
 
 
 def test_sampling_probabilities_prefer_cyber_and_local_over_general():
-    source_names = ["local_incident_response", "circl_vuln_patch", "climbmix", "wikipedia"]
-    probs = dict(zip(source_names, prepare_data._build_sampling_probs(source_names)))
+    # Weights rank sources INSIDE a bucket; cross-bucket size is TARGET_DOMAIN_SHARE.
+    cyber = ["local_incident_response", "circl_vuln_patch"]
+    general = ["climbmix", "wikipedia"]
+    cyber_probs = dict(zip(cyber, prepare_data._build_sampling_probs(cyber)))
+    general_probs = dict(zip(general, prepare_data._build_sampling_probs(general)))
 
-    assert probs["local_incident_response"] > probs["climbmix"]
-    assert probs["circl_vuln_patch"] > probs["wikipedia"]
+    assert cyber_probs["circl_vuln_patch"] > cyber_probs["local_incident_response"]
+    assert general_probs["climbmix"] > general_probs["wikipedia"]
+
+
+def test_indonesian_sources_land_in_general():
+    # No more dedicated "indonesian" bucket — wikipedia_id/fineweb2_id fold into
+    # "general" in both stage profiles, their share governed by intra-bucket weights.
+    assert prepare_data._source_bucket("wikipedia_id") == "general"
+    assert prepare_data._source_bucket("fineweb2_id") == "general"
+    assert prepare_data._source_bucket("wikipedia_id", stage="cpt") == "general"
+    assert prepare_data._source_bucket("climbmix") == "general"
+
+
+def test_stage_profiles_sum_to_one():
+    assert sum(prepare_data.PRETRAIN_TARGET_SHARE.values()) == pytest.approx(1.0)
+    assert sum(prepare_data.CPT_TARGET_SHARE.values()) == pytest.approx(1.0)
+    assert sum(prepare_data.TARGET_DOMAIN_SHARE.values()) == pytest.approx(1.0)
+
+
+def test_cpt_cyber_and_code_leaf_shares_sum_correctly():
+    cyber_total = sum(v for k, v in prepare_data.CPT_TARGET_SHARE.items() if k.startswith("cyber_"))
+    code_total = sum(v for k, v in prepare_data.CPT_TARGET_SHARE.items() if k.startswith("code_"))
+    assert cyber_total == pytest.approx(0.50)
+    assert code_total == pytest.approx(0.30)
+
+
+def test_cpt_bucket_routing():
+    # Code sources fan out to leaf buckets by name; cyber sources all share one pool
+    # bucket for source *selection* (the leaf is decided per document — see below).
+    assert prepare_data._source_bucket("secure_code_python", stage="cpt") == "code_python"
+    assert prepare_data._source_bucket("secure_code_c", stage="cpt") == "code_c_cpp"
+    assert prepare_data._source_bucket("secure_code_cpp", stage="cpt") == "code_c_cpp"
+    assert prepare_data._source_bucket("code_powershell", stage="cpt") == "code_shell"
+    assert prepare_data._source_bucket("secure_code_rust", stage="cpt") == "code_systems"
+    assert prepare_data._source_bucket("metasploit", stage="cpt") == "code_other"
+    assert prepare_data._source_bucket("nvd_cve", stage="cpt") == "cybersecurity"
+    assert prepare_data._source_bucket("primus_nemotron_cc", stage="cpt") == "cybersecurity"
+    assert prepare_data._source_bucket("finemath", stage="cpt") == "instruction"
+
+
+def test_classify_cyber_subdomain_routes_obvious_documents():
+    cases = {
+        "cyber_vuln_analysis": "This CWE-787 out-of-bounds write leads to a heap overflow discovered "
+                                "via fuzzing with a custom AFL++ harness and confirmed with ASAN.",
+        "cyber_reports_cve": "CVE-2024-3400 is tracked in the CISA Known Exploited Vulnerabilities "
+                              "catalog; vendor security bulletin lists CVSS 10.0.",
+        "cyber_web": "The application is vulnerable to reflected XSS and SQL injection via the "
+                     "search parameter, an OWASP Top 10 issue in the HTTP request handler.",
+        "cyber_network": "Suricata and Zeek IDS sensors flagged a port scan over TCP before lateral "
+                          "movement was observed in the packet capture from Wireshark.",
+        "cyber_os_linux": "The exploit abuses sudo misconfiguration for privilege escalation, then "
+                           "edits the Windows registry and disables Sysmon logging via SELinux bypass.",
+        "cyber_malware_re": "Analysts used Ghidra and IDA Pro to disassemble the packed shellcode, "
+                             "extracting the C2 server address embedded in the PE header.",
+        "cyber_cloud_container": "A misconfigured Kubernetes IAM policy allowed container escape and "
+                                  "access to an exposed S3 bucket, visible in the CloudTrail audit log.",
+        "cyber_crypto": "The TLS handshake negotiates an AES-256 cipher; the certificate authority "
+                         "validates the RSA key via a PKI chain with HMAC-SHA-256 integrity checks.",
+    }
+    for expected_leaf, text in cases.items():
+        assert prepare_data.classify_cyber_subdomain(text) == expected_leaf
+
+    # No keyword hits at all -> fundamentals fallback.
+    assert prepare_data.classify_cyber_subdomain(
+        "A general overview of security awareness training for new employees."
+    ) == "cyber_fundamentals"
+
+
+def test_cyber_leaf_skip_cap_releases_after_50_consecutive_skips():
+    leaf_stats = {"cyber_web": {"docs": 100, "chars": 1_000_000}}
+    global_chars = 1_000_000  # cyber_web already at 100% of everything written — always over target
+
+    # Below the cap: an over-target leaf keeps getting skipped.
+    assert prepare_data._cyber_leaf_should_skip("cyber_web", leaf_stats, global_chars, 49) is True
+    # At the cap: forced acceptance so a starved/over-supplied leaf can't stall the run.
+    assert prepare_data._cyber_leaf_should_skip("cyber_web", leaf_stats, global_chars, 50) is False
+
+
+def test_cpt_bucket_picker_drives_the_mix_to_the_leaf_targets(monkeypatch):
+    """Same greedy-deficit pattern as the pretrain test above, but exercising the
+    cpt profile's leaf buckets (code leaves + general + instruction; the cyber pool
+    is exercised separately since its leaf is decided per document, not per source)."""
+    monkeypatch.setattr(prepare_data, "TARGET_DOMAIN_SHARE", prepare_data.CPT_TARGET_SHARE)
+    names = ["secure_code_python", "secure_code_c", "code_powershell", "climbmix", "finemath"]
+    samplers = prepare_data._build_bucket_samplers(names, stage="cpt")
+    doc_chars = {"secure_code_python": 500, "secure_code_c": 500, "code_powershell": 200,
+                 "climbmix": 4000, "finemath": 2000}
+    stats = {n: {"docs": 0, "chars": 0} for n in names}
+
+    for _ in range(4000):
+        bucket = prepare_data._pick_bucket(samplers, stats, stage="cpt")
+        picked = samplers[bucket][0][0]
+        stats[picked]["docs"] += 1
+        stats[picked]["chars"] += doc_chars[picked]
+
+    total = sum(s["chars"] for s in stats.values())
+    # Only 5 of the cpt profile's 17 buckets are exercised here, so _pick_bucket
+    # renormalizes target shares over just those 5 (see _pick_bucket's target_total) —
+    # mirror that when computing the expected share, instead of comparing to the raw
+    # (whole-profile) CPT_TARGET_SHARE value.
+    target_total = sum(prepare_data._bucket_target_share(b) for b in samplers)
+    for name in names:
+        bucket = prepare_data._source_bucket(name, stage="cpt")
+        target = prepare_data._bucket_target_share(bucket) / target_total
+        assert stats[name]["chars"] / total == pytest.approx(target, abs=0.02)
+
+
+def test_bucket_picker_drives_the_mix_to_the_target_shares():
+    """Greedy deficit picking must land on TARGET_DOMAIN_SHARE despite uneven doc sizes.
+
+    One source per pretrain bucket (general/code/cybersecurity/instruction — no more
+    "indonesian" bucket, wikipedia_id now shares "general" with climbmix, so it's left
+    out here to keep this a clean one-source-per-bucket check).
+    """
+    names = ["climbmix", "secure_code_python", "nvd_cve", "finemath"]
+    samplers = prepare_data._build_bucket_samplers(names)
+    # Wildly different document lengths per bucket — the whole point of char-based deficits.
+    doc_chars = {"climbmix": 4000, "secure_code_python": 500,
+                 "nvd_cve": 300, "finemath": 2000}
+    stats = {n: {"docs": 0, "chars": 0} for n in names}
+
+    for _ in range(4000):
+        bucket = prepare_data._pick_bucket(samplers, stats)
+        picked = samplers[bucket][0][0]  # single source per bucket here
+        stats[picked]["docs"] += 1
+        stats[picked]["chars"] += doc_chars[picked]
+
+    total = sum(s["chars"] for s in stats.values())
+    for name in names:
+        target = prepare_data.TARGET_DOMAIN_SHARE[prepare_data._source_bucket(name)]
+        assert stats[name]["chars"] / total == pytest.approx(target, abs=0.02)
 
 
 def test_dry_run_exits_before_interleaved_streaming(monkeypatch, tmp_path, capsys):
@@ -120,7 +254,7 @@ def test_dry_run_exits_before_interleaved_streaming(monkeypatch, tmp_path, capsy
     output = capsys.readouterr().out
     assert called is False
     assert "[DRY RUN]" in output
-    assert "Approx target by category" in output
+    assert "Planned mix" in output
     assert "local files" in output
 
 
@@ -330,6 +464,29 @@ def test_second_batch_appends_instead_of_overwriting(monkeypatch, tmp_path, caps
         assert progress_second["stats"].get(name, {}).get("docs")
 
 
+def test_val_shard_has_fixed_name_and_does_not_consume_shard_idx(monkeypatch, tmp_path, capsys):
+    """The validation shard must be named val_shard.parquet, not shard_{idx:05d}.parquet
+    (see mesosfer/data/dataset.py's split_parquet_paths), and writing it must not advance
+    next_shard_idx — that index is only for real training shards.
+    """
+    _patch_streaming(monkeypatch)
+    first, second = _two_batches()
+    out = str(tmp_path)
+
+    prepare_data.interleaved_shuffle_main(_Args(), list(first), out)
+    capsys.readouterr()
+
+    assert (tmp_path / "val_shard.parquet").exists()
+    assert _shard_count(tmp_path) == prepare_data.load_progress(out)["next_shard_idx"]
+
+    # A second batch collects new val docs and rewrites the same val shard — it must
+    # overwrite val_shard.parquet in place, not add a second file under a new name.
+    prepare_data.interleaved_shuffle_main(_Args(), list(second), out)
+    capsys.readouterr()
+    assert len(list(tmp_path.glob("val_shard*.parquet"))) == 1
+    assert _shard_count(tmp_path) == prepare_data.load_progress(out)["next_shard_idx"]
+
+
 def test_already_completed_sources_are_skipped(monkeypatch, tmp_path, capsys):
     _patch_streaming(monkeypatch)
     first, _ = _two_batches()
@@ -387,3 +544,104 @@ def test_checkpoint_every_gb_can_disable_checkpoints(monkeypatch, tmp_path, caps
     capsys.readouterr()
 
     assert calls == [], f"checkpoint written despite a 9999 GB threshold: {calls}"
+
+
+def test_shard_buffer_flushes_on_byte_cap_before_doc_count(monkeypatch, tmp_path, capsys):
+    """current_shard must flush once buffered chars cross SHARD_BUFFER_MAX_CHARS, even
+    when args.shard_size (doc count) is nowhere near being hit — otherwise a run drawing
+    large documents holds an unbounded amount of text in RAM before ever flushing."""
+    _patch_streaming(monkeypatch)
+    monkeypatch.setattr(prepare_data, "SHARD_BUFFER_MAX_CHARS", 2000)
+    first, _ = _two_batches()
+    out = str(tmp_path)
+
+    class HighDocCount(_Args):
+        shard_size = 100_000  # far above the ~4000 docs this run produces
+
+    prepare_data.interleaved_shuffle_main(HighDocCount(), list(first), out)
+    capsys.readouterr()
+
+    assert _shard_count(tmp_path) > 1, "byte cap did not flush before the doc-count cap"
+
+
+# ---------------------------------------------------------------------------
+# ClimbMix pre-download must stay pinned to a bare-minimum validation shard.
+#
+# dataset.py merges base_data_climbmix ADDITIVELY with the interleaved output
+# (it only needs the dir to exist for its last-file validation shard), while
+# climbmix is ALSO streamed fresh as one of the interleaved general-bucket
+# sources. Sizing the pre-download off --max-tokens double-counted it and
+# diluted TARGET_DOMAIN_SHARE.
+# ---------------------------------------------------------------------------
+
+def test_climbmix_predownload_is_pinned_to_minimum_regardless_of_budget(monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(prepare_data, "get_base_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(prepare_data, "download_climbmix_shards", lambda n, w: calls.append(n))
+    monkeypatch.setattr(prepare_data, "interleaved_shuffle_main", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["prepare_data.py", "--max-tokens", "15000000000"])
+
+    prepare_data.main()
+    capsys.readouterr()
+
+    # 1 requested shard + the always-appended validation shard = 2 total, no matter
+    # how large the budget is.
+    assert calls == [1]
+
+
+def test_expected_source_share_is_gone():
+    """The only caller of _expected_source_share was the old budget-scaled
+    ClimbMix sizing logic; it must not linger as dead code."""
+    assert not hasattr(prepare_data, "_expected_source_share")
+
+
+# ---------------------------------------------------------------------------
+# Dry-run supply reporting must reflect what a source can really deliver.
+# ---------------------------------------------------------------------------
+
+def test_local_files_estimated_tokens_uses_real_disk_bytes(tmp_path):
+    local_file = tmp_path / "a.jsonl"
+    local_file.write_text("y" * 400, encoding="utf-8")  # 400 bytes
+
+    tokens = prepare_data._local_files_estimated_tokens(
+        {"local_paths": [str(local_file)]}
+    )
+
+    assert tokens == 100  # 400 bytes / CHARS_PER_TOKEN (4.0)
+
+
+def test_pdf_manifest_sources_report_zero_supply_not_declared_cap():
+    for name in ("academic_security_papers", "threat_report_pdfs"):
+        src = prepare_data.DATASET_SOURCES[name]
+        assert src["source_type"] == "pdf_manifest"
+        assert src["max_tokens"] > 0  # declared cap still exists...
+        assert prepare_data._effective_source_cap_tokens(src) == 0  # ...but supplies nothing
+
+
+def test_declared_local_caps_massively_overstate_real_disk_supply():
+    """Regression guard for the dry-run bug: local_files sources declare
+    1.2-1.44B token caps each (~6.48B combined) but the bundled files on disk
+    total well under 1M tokens. The report must use the real number."""
+    local_names = [
+        name for name, cfg in prepare_data.DATASET_SOURCES.items()
+        if cfg.get("source_type") == "local_files"
+    ]
+    assert len(local_names) >= 5
+
+    declared_total = sum(prepare_data.DATASET_SOURCES[n]["max_tokens"] for n in local_names)
+    real_total = sum(
+        prepare_data._effective_source_cap_tokens(prepare_data.DATASET_SOURCES[n])
+        for n in local_names
+    )
+
+    assert declared_total > 6_000_000_000
+    assert real_total < 1_000_000
+
+
+def test_vocab_fallback_matches_tok_train_default(tmp_path, monkeypatch):
+    """prepare_data runs before tok_train in the pipeline, so this fallback (no
+    tokenizer on disk yet) is the vocab size actually used to size the dataset —
+    it must match tok_train.py's --vocab-size default (98304), not drift from it."""
+    monkeypatch.setattr(prepare_data, "get_base_dir", lambda: str(tmp_path))
+
+    assert prepare_data._get_vocab_size() == 98304

@@ -292,9 +292,10 @@ mesosfer auto-merges parquet shards from two sources for pretraining:
     └── ...
 ```
 
-The dataloader (`mesosfer/data/dataloader.py`) reads from both directories. Auxiliary
-shards from `base_data_cybersecurity/` are placed BEFORE primary ClimbMix shards in
-the iteration order, so the validation shard always comes from ClimbMix.
+The dataloader (`mesosfer/data/dataloader.py`) reads from both directories. Validation
+is `val_shard.parquet` — the multi-domain held-out split `prepare_data` writes, picked
+by name so it is never trained on. Corpora prepared before that filename existed have
+no such file, and fall back to the old rule: validation is the last ClimbMix shard.
 
 **Recommended pipeline order:**
 
@@ -379,8 +380,8 @@ Common arguments for `scripts/train/base_train.py`:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--depth` | 20 | Transformer depth |
-| `--aspect-ratio` | 64 | model_dim = depth * aspect_ratio |
+| `--depth` | 32 | Transformer depth |
+| `--aspect-ratio` | 128 | model_dim = depth * aspect_ratio |
 | `--head-dim` | 128 | Attention head dimension |
 | `--max-seq-len` | 2048 | Context length |
 | `--device-batch-size` | 32 | Per-GPU batch size |

@@ -77,6 +77,7 @@ for flops in "${FLOPS_BUDGETS[@]}"; do
         # CORE eval happens once at the end (999999 ensures only final step)
         torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.train.base_train -- \
             --depth=$d \
+            --aspect-ratio=64 \
             --target-flops=$flops \
             --target-param-data-ratio=-1 \
             --run="${WANDB_RUN}_${TAG}" \
