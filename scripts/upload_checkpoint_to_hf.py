@@ -607,7 +607,7 @@ def top_level_menu(base_dir: str) -> str:
 
 # ── HF login helper ───────────────────────────────────────────────────────────
 
-def _hf_login(repo: str, public: bool = False) -> object | None:
+def _hf_login(repo: str, private: bool = True) -> object | None:
     """Import HfApi, verify login, ensure repo exists. Returns api or None."""
     try:
         from huggingface_hub import HfApi
@@ -625,11 +625,9 @@ def _hf_login(repo: str, public: bool = False) -> object | None:
         err("Run: hf auth login")
         return None
 
-    # Private unless asked otherwise. exist_ok means this never changes the visibility of a
-    # repo that already exists — an accidental --public cannot expose an existing private one,
-    # and a repo you made public on the Hub stays public without the flag.
-    api.create_repo(repo_id=repo, repo_type="model", private=not public, exist_ok=True)
-    info(f"Repo: {repo} ({'public' if public else 'private'} if newly created)\n")
+    repo_type = "dataset" if repo.endswith("/dataset") else "model"
+    api.create_repo(repo_id=repo, repo_type=repo_type, private=private, exist_ok=True)
+    info(f"Repo: {repo}\n")
     return api
 
 
@@ -653,6 +651,11 @@ def main():
     parser.add_argument("--public", action="store_true",
                         help="Create the repo public if it does not exist yet (default: private). "
                              "Never changes an existing repo's visibility.")
+
+    parser.add_argument("--public", action="store_true", default=False,
+                        help="Make the HuggingFace repository public")
+    parser.add_argument("--private", action="store_true", default=False,
+                        help="Make the HuggingFace repository private (default)")
 
     # Model checkpoint flags (backward-compatible)
     g = parser.add_argument_group("model checkpoint")
@@ -716,7 +719,8 @@ def main():
         args.repo = f"{username}/dataset"
 
     # ── HF login (shared for all artifacts) ──────────────────────────────────
-    api = _hf_login(args.repo, public=args.public)
+    is_private = False if args.public else True
+    api = _hf_login(args.repo, private=is_private)
     if api is None:
         return
 

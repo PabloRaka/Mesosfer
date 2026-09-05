@@ -156,6 +156,18 @@ SOURCES = {
         "gated": False,
     },
     # -------------------------------------------------------------------------
+    # Alpaca GPT-4 Indonesian — ~52K high-quality GPT-4 translated instruction rows
+    # HF Link: https://huggingface.co/datasets/FreedomIntelligence/alpaca-gpt4-indonesian
+    "alpaca_gpt4_indonesian": {
+        "hf_name": "FreedomIntelligence/alpaca-gpt4-indonesian",
+        "split": "train",
+        "streaming": False,
+        "format": "messages",
+        "output_file": "alpaca_gpt4_indonesian_sft.jsonl",
+        "max_rows": 52_000,
+        "gated": False,
+    },
+    # -------------------------------------------------------------------------
     # NOTE: competition_math_sft (hendrycks/competition_math) was removed — the repo no
     # longer exists on the Hub (DatasetNotFoundError, not a permission problem). It was
     # redundant anyway: numinamath_cot supplies competition-level maths with explicit
@@ -870,15 +882,15 @@ def main():
         print("\nAvailable SFT sources:")
         for name, cfg in SOURCES.items():
             gated = " [GATED - needs HF_TOKEN]" if cfg.get("gated") else ""
-            print(f"  {name:<25} → {cfg['output_file']}{gated}")
+            print(f"  {name:<25} -> {cfg['output_file']}{gated}")
         return
 
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if hf_token and hf_token != "your_hugging_face_token_here":
-        logger.info("✓ HF token found")
+        logger.info("[OK] HF token found")
     else:
         hf_token = None
-        logger.warning("⚠ No HF token — gated datasets will be skipped")
+        logger.warning("[!] No HF token - gated datasets will be skipped")
 
     global SFT_DIR
     if args.sample_10k:

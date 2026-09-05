@@ -19,13 +19,23 @@ from __future__ import annotations
 
 import os
 import sys
-import tty
-import termios
 import contextlib
 import threading
 import time
 import itertools
 from typing import Sequence
+
+if sys.platform == "win32":
+    import msvcrt
+    tty = None
+    termios = None
+else:
+    try:
+        import tty
+        import termios
+    except ImportError:
+        tty = None
+        termios = None
 
 
 # ── Terminal capability detection ─────────────────────────────────────────────
@@ -157,6 +167,23 @@ _KEY_QUIT  = (b"q", b"Q", b"\x1b", b"\x03")  # q, Q, ESC, Ctrl-C
 
 def _read_key() -> bytes:
     """Read one keypress (raw mode). Returns bytes."""
+    if sys.platform == "win32" and msvcrt is not None:
+        ch = msvcrt.getch()
+        if ch in (b"\x00", b"\xe0"):  # Prefix for arrow keys on Windows
+            ch2 = msvcrt.getch()
+            if ch2 == b"H":  # Up arrow
+                return _KEY_UP
+            elif ch2 == b"P":  # Down arrow
+                return _KEY_DOWN
+            return ch + ch2
+        return ch
+
+    if termios is None or tty is None:
+        try:
+            return sys.stdin.read(1).encode()
+        except Exception:
+            return b"\n"
+
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:

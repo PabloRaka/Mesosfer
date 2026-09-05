@@ -21,27 +21,31 @@ def extract_imports(prompt):
             break
     return '\n'.join(imports)
 
-def extract_program(completion):
+def extract_program(completion, entry_point=None):
     """
     Extract Python code from LLM completion.
 
     Handles various output formats:
     - Code wrapped in ```python ... ``` or ``` ... ``` blocks
+    - Multiple code blocks (prioritizing the one defining entry_point)
     - Plain code without markdown blocks
-    - Extra text before/after code blocks
-
-    Returns the first code block if found, otherwise returns the whole completion.
+    - Extra conversational text before/after code blocks
     """
-    # Try to find markdown code blocks (```python or just ```)
-    # Match ```python\n...\n``` or ```\n...\n```
-    pattern = r'```(?:python)?\s*\n(.*?)\n```'
+    if not completion:
+        return ""
+
+    # Match all markdown code blocks
+    pattern = r'```(?:python)?\s*\n?(.*?)\n?```'
     matches = re.findall(pattern, completion, re.DOTALL)
 
     if matches:
-        # Return the first code block found
+        if entry_point:
+            for m in matches:
+                if f"def {entry_point}" in m:
+                    return m.strip()
         return matches[0].strip()
 
-    # No code blocks found, return the whole completion
+    # No code blocks found, return the cleaned completion
     return completion.strip()
 
 class HumanEval(Task):
@@ -78,20 +82,23 @@ class HumanEval(Task):
 
     def evaluate(self, conversation, completion):
         """ Given (conversation, completion), return boolean success of the completion. """
-        # the prompt will contain the imports and the function signature
-        imports = extract_imports(conversation['messages'][0]['content'])
-        # the completion will usually contain the whole function
-        # but not always with the needed imports, so we manually append them
-        completion_code = extract_program(completion)
+        entry_point = conversation.get('entry_point', '')
+        prompt = conversation['messages'][0]['content']
+        imports = extract_imports(prompt)
+        completion_code = extract_program(completion, entry_point=entry_point)
+
+        # If the completion doesn't redefine the function, prepend the prompt
+        if entry_point and f"def {entry_point}" not in completion_code:
+            code_body = prompt + "\n" + completion_code
+        else:
+            code_body = imports + "\n\n" + completion_code
+
         program = (
-            imports
-            + "\n\n"
-            + completion_code
+            code_body
             + "\n\n"
             + conversation['test']
             + "\n"
-            + f"check({conversation['entry_point']})"
+            + f"check({entry_point})"
         )
         result = execute_code(program)
-        success = result.success
-        return success
+        return result.success

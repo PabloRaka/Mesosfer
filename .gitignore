@@ -36,3 +36,29 @@ data_checkpoint_*.tar.gz
 
 # RLHF collected feedback (runtime data, not for version control)
 data/rlhf/feedback.jsonl
+
+# External large SFT datasets (downloaded via download_sft_data.py)
+data/sft/alpaca_gpt4_indonesian_sft.jsonl
+data/sft/magpie_reasoning_sft.jsonl
+data/sft/openhermes_sft.jsonl
+data/sft/ultrachat_sft.jsonl
+data/sft/primus_*.jsonl
+data/sft/trendyol_*.jsonl
+data/sft/fenrir_*.jsonl
+data/sft/nist_*.jsonl
+data/sft/tiamz_*.jsonl
+data/sft/cybernative_*.jsonl
+data/sft/open_thoughts_*.jsonl
+data/sft/hermes_*.jsonl
+data/sft/kimi_*.jsonl
+data/sft/cot_*.jsonl
+data/sft/qyrou_*.jsonl
+data/sft/code_feedback_*.jsonl
+data/sft/numinamath_*.jsonl
+data/sft/aquilax_*.jsonl
+data/sft/xlam_*.jsonl
+scripts/download_sft_direct.py
+
+# Generated benchmark cards
+benchmark_*.html
+benchmark_card.html

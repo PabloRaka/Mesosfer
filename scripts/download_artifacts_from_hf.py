@@ -47,6 +47,13 @@ import sys
 from pathlib import Path
 from typing import Iterable
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # ── UI helpers (shared with upload script) ────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 from _ui import (  # noqa: E402
@@ -124,7 +131,7 @@ def _resolve_username(cli_value: str | None) -> str:
 # ── Constants ────────────────────────────────────────────────────────────────
 
 DEFAULT_REPO = None  # resolved at runtime via _resolve_username()
-DEFAULT_DEPTH = "d32"
+DEFAULT_DEPTH = "d12"
 
 SOURCE_DIR_MAP = {
     "base": "base_checkpoints",

@@ -333,36 +333,79 @@ def run_chat_domain_eval(model, tokenizer, device, max_problems=None, domains="c
 
 
 def print_final_chat_eval_summary(results, baseline_accuracies, chatcore_metric_dict,
-                                  domain_results=None, domain_centered_results=None, domain_metrics=None):
-    print0("\n" + "=" * 80)
-    print0("Final Chat Evaluation Summary")
-    print0("=" * 80)
+                                  domain_results=None, domain_centered_results=None, domain_metrics=None,
+                                  model_info=None):
+    width = 78
+    print0("\n" + "╔" + "═" * (width - 2) + "╗")
+    print0(f"║{'MESOSFER MODEL EVALUATION SUMMARY':^{width - 2}}║")
+    if model_info:
+        print0(f"║{model_info:^{width - 2}}║")
+    print0("╠" + "═" * (width - 2) + "╣")
+
+    # Table Header
+    print0(f"║ {'Benchmark / Task':<40} │ {'Accuracy':>12} │ {'Centered':>16} ║")
+    print0("╟" + "─" * 42 + "┼" + "─" * 14 + "┼" + "─" * 18 + "╢")
 
     overall_centered = []
+
     if results:
-        if chatcore_metric_dict:
-            print0(f"ChatCORE metric: {chatcore_metric_dict['ChatCORE metric']:.4f}")
+        print0(f"║ 🎯 CORE BENCHMARKS{' ':>55}║")
         for task_name, acc in results.items():
             baseline_acc = baseline_accuracies.get(task_name, 0.0)
             centered = (acc - baseline_acc) / (1.0 - baseline_acc)
             overall_centered.append(centered)
-            print0(f"  {task_name:<35} accuracy: {acc:.4f} | centered: {centered:.4f}")
-
-    if domain_metrics:
-        print0("")
-        for name, value in domain_metrics.items():
-            print0(f"{name}: {value:.4f}")
+            print0(f"║   • {task_name:<36} │ {acc*100:>10.2f}% │ {centered:>16.4f} ║")
 
     if domain_results:
-        for label, accuracy in domain_results.items():
-            centered = domain_centered_results[label]
-            overall_centered.append(centered)
-            print0(f"  {label:<35} accuracy: {accuracy:.4f} | centered: {centered:.4f}")
+        # Separate cyber and coding
+        cyber_items = [(k, v) for k, v in domain_results.items() if k.startswith(("mmlu_computer", "cybermetric", "secbench"))]
+        coding_items = [(k, v) for k, v in domain_results.items() if k.startswith("codemmlu")]
+        other_items = [(k, v) for k, v in domain_results.items() if k not in dict(cyber_items) and k not in dict(coding_items)]
+
+        if cyber_items:
+            print0("╟" + "─" * 42 + "┼" + "─" * 14 + "┼" + "─" * 18 + "╢")
+            print0(f"║ 🛡️  CYBERSECURITY DOMAIN{' ':>51}║")
+            for label, acc in cyber_items:
+                centered = domain_centered_results.get(label, 0.0)
+                overall_centered.append(centered)
+                print0(f"║   • {label:<36} │ {acc*100:>10.2f}% │ {centered:>16.4f} ║")
+
+        if coding_items:
+            print0("╟" + "─" * 42 + "┼" + "─" * 14 + "┼" + "─" * 18 + "╢")
+            print0(f"║ 💻 CODING DOMAIN{' ':>58}║")
+            for label, acc in coding_items:
+                centered = domain_centered_results.get(label, 0.0)
+                overall_centered.append(centered)
+                print0(f"║   • {label:<36} │ {acc*100:>10.2f}% │ {centered:>16.4f} ║")
+
+        if other_items:
+            print0("╟" + "─" * 42 + "┼" + "─" * 14 + "┼" + "─" * 18 + "╢")
+            print0(f"║ 📂 OTHER DOMAINS{' ':>58}║")
+            for label, acc in other_items:
+                centered = domain_centered_results.get(label, 0.0)
+                overall_centered.append(centered)
+                print0(f"║   • {label:<36} │ {acc*100:>10.2f}% │ {centered:>16.4f} ║")
+
+    # Metrics Summary Section
+    print0("╠" + "═" * (width - 2) + "╣")
+    print0(f"║ 📊 SUMMARY METRICS{' ':>56}║")
+    print0("╟" + "─" * (width - 2) + "╢")
+
+    if chatcore_metric_dict and "ChatCORE metric" in chatcore_metric_dict:
+        core_val = chatcore_metric_dict["ChatCORE metric"]
+        print0(f"║   ★ ChatCORE Metric (General Chat)     : {core_val:>31.4f} ║")
+
+    if domain_metrics:
+        for name, value in domain_metrics.items():
+            clean_name = name.replace(" metric", "").strip()
+            print0(f"║   ★ {clean_name:<37}: {value:>31.4f} ║")
 
     if overall_centered:
         overall_metric = sum(overall_centered) / len(overall_centered)
-        print0("")
-        print0(f"ChatCORE overall metric: {overall_metric:.4f}")
+        print0("╟" + "─" * (width - 2) + "╢")
+        print0(f"║   🏆 OVERALL COMBINED SCORE            : {overall_metric:>31.4f} ║")
+
+    print0("╚" + "═" * (width - 2) + "╝\n")
 
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -376,9 +419,10 @@ if __name__ == "__main__":
     parser.add_argument('-n', '--num-samples', type=int, default=1)
     parser.add_argument('-k', '--top-k', type=int, default=50)
     parser.add_argument('-b', '--batch-size', type=int, default=8, help='Batch size for categorical evaluation')
-    parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
+    parser.add_argument('-g', '--model-tag', '--depth', type=str, default=None, help='Model tag or depth to load (e.g. d12)')
     parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
-    parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate')
+    parser.add_argument('-x', '--max-problems', type=int, default=None, help='Max problems to evaluate across all tasks')
+    parser.add_argument('--gsm8k-max-problems', type=int, default=None, help='Max problems specifically for GSM8K (e.g. 100)')
     parser.add_argument('--domain-eval', type=int, default=0, help='1 = also run cyber/coding domain evals')
     parser.add_argument('--domain-eval-domains', type=str, default='cyber,coding', help='Comma-separated domain eval groups: cyber,coding')
     parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
@@ -410,6 +454,7 @@ if __name__ == "__main__":
     # Run all the task evaluations sequentially
     results = {}
     for task_name in task_names:
+        task_max_problems = args.gsm8k_max_problems if (task_name == "GSM8K" and args.gsm8k_max_problems is not None) else args.max_problems
         acc = run_chat_eval(
             task_name,
             model, tokenizer, engine,
@@ -418,7 +463,7 @@ if __name__ == "__main__":
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
-            max_problems=args.max_problems,
+            max_problems=task_max_problems,
         )
         results[task_name] = acc
         print0(f"{task_name} accuracy: {100 * acc:.2f}%")
@@ -457,6 +502,9 @@ if __name__ == "__main__":
     if overall_centered:
         overall_metric_dict = {"ChatCORE overall metric": sum(overall_centered) / len(overall_centered)}
 
+    step_val = args.step if args.step is not None else meta.get('step', 'latest')
+    model_info_str = f"Model: {args.source.upper()} | Depth: {args.model_tag or 'd12'} | Step: {step_val}"
+
     print_final_chat_eval_summary(
         results,
         baseline_accuracies,
@@ -464,7 +512,44 @@ if __name__ == "__main__":
         domain_results=domain_results,
         domain_centered_results=domain_centered_results,
         domain_metrics=domain_metrics,
+        model_info=model_info_str,
     )
+
+    # Save a clean Markdown summary report for easy reference
+    try:
+        report_file = Path(f"eval_summary_{args.source}_{step_val}.md")
+        with report_file.open("w", encoding="utf-8") as f:
+            f.write(f"# Mesosfer Model Evaluation Summary\n\n")
+            f.write(f"**{model_info_str}**\n\n")
+            if results:
+                f.write("## 🎯 Core Benchmarks\n\n")
+                f.write("| Benchmark | Accuracy (%) | Centered Score |\n| :--- | :---: | :---: |\n")
+                for task_name, acc in results.items():
+                    b_acc = baseline_accuracies.get(task_name, 0.0)
+                    cent = (acc - b_acc) / (1.0 - b_acc)
+                    f.write(f"| `{task_name}` | {acc*100:.2f}% | {cent:.4f} |\n")
+                f.write("\n")
+            if domain_results:
+                f.write("## 🛡️ Domain Benchmarks\n\n")
+                f.write("| Domain Task | Accuracy (%) | Centered Score |\n| :--- | :---: | :---: |\n")
+                for label, acc in domain_results.items():
+                    cent = domain_centered_results.get(label, 0.0)
+                    f.write(f"| `{label}` | {acc*100:.2f}% | {cent:.4f} |\n")
+                f.write("\n")
+            if domain_metrics or chatcore_metric_dict or overall_centered:
+                f.write("## 📊 Summary Metrics\n\n")
+                f.write("| Metric | Value |\n| :--- | :---: |\n")
+                if chatcore_metric_dict and "ChatCORE metric" in chatcore_metric_dict:
+                    f.write(f"| **ChatCORE Metric (General)** | **{chatcore_metric_dict['ChatCORE metric']:.4f}** |\n")
+                if domain_metrics:
+                    for name, value in domain_metrics.items():
+                        f.write(f"| **{name}** | **{value:.4f}** |\n")
+                if overall_centered:
+                    f.write(f"| 🏆 **ChatCORE Overall Combined** | **{sum(overall_centered)/len(overall_centered):.4f}** |\n")
+            f.write("\n")
+        print0(f"Saved evaluation markdown summary to: {report_file.resolve()}")
+    except Exception as e:
+        print0(f"Notice: Could not write eval_summary.md ({e})")
 
     get_report().log(section="Chat evaluation " + args.source, data=[
         vars(args), # CLI args
