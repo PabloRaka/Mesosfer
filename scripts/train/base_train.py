@@ -14,6 +14,7 @@ python -m scripts.train.base_train --depth=4 --max-seq-len=512 --device-batch-si
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import gc
+import sys
 import json
 import time
 import math
@@ -30,7 +31,7 @@ from mesosfer.model.gpt import GPT, GPTConfig, Linear
 from mesosfer.data.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from mesosfer.utils.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from mesosfer.data.tokenizer import get_tokenizer, get_token_bytes
-from mesosfer.utils.checkpoint_manager import save_checkpoint, load_checkpoint
+from mesosfer.utils.checkpoint_manager import save_checkpoint, load_checkpoint, load_model_from_dir
 from mesosfer.eval.loss_eval import evaluate_bpb
 from mesosfer.eval.engine import Engine
 from mesosfer.model.flash_attention import ATTENTION_BACKEND, HAS_FA2, HAS_FA3, _is_rocm
@@ -71,8 +72,9 @@ parser.add_argument("--skip-nan-step", type=int, default=1, help="skip optimizer
 parser.add_argument("--warmup-steps", type=int, default=200, help="number of steps for LR warmup (200 recommended for depth 20+, 40 ok for tiny models)")
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
-parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable)")
+parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable). Continues the SAME run: same checkpoint dir, optimizer state, and dataloader position.")
 parser.add_argument("--load-optimizer", type=int, default=1, help="when resuming, load optimizer state too (1=yes default, 0=fresh optimizer)")
+parser.add_argument("--init-from", type=str, default="", help="continued pretraining (CPT): load ONLY model weights from this base checkpoint tag (optionally 'tag:step') and start a brand-new run at step 0 with a fresh optimizer/schedule. Mutually exclusive with --resume-from-step.")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on")
@@ -83,7 +85,10 @@ parser.add_argument("--save-every", type=int, default=1000, help="save checkpoin
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 parser.add_argument("--tokenizer-dir", type=str, default=None, help="load tokenizer + token_bytes from this dir instead of <base_dir>/tokenizer (used by tokenizer BPB sweeps)")
+parser.add_argument("--data-dir", type=str, default="", help="train/val only from this single parquet directory, no auxiliary merge (e.g. for CPT on a dedicated corpus). Empty (default) = today's merge-everything behavior.")
 args = parser.parse_args()
+if args.init_from and args.resume_from_step != -1:
+    raise ValueError("--init-from and --resume-from-step are mutually exclusive: --init-from starts a NEW run from a checkpoint's weights, --resume-from-step continues an existing run.")
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -154,18 +159,59 @@ def build_model_meta(depth):
         model_meta = GPT(config)
     return model_meta
 
-# Build the model, move to device, init the weights
-model = build_model_meta(args.depth) # 1) Build on meta device (only shapes/dtypes, no data)
-model_config = model.config
+base_dir = get_base_dir()
+
+# Build the model, move to device, init the weights - OR, for CPT (--init-from), load an
+# existing checkpoint's weights instead and start a brand-new run (fresh optimizer/step/LR).
+if args.init_from:
+    parts = args.init_from.split(":", 1)
+    init_from_tag = parts[0]
+    init_from_step = int(parts[1]) if len(parts) > 1 else None
+    src_checkpoints_dir = os.path.join(base_dir, "base_checkpoints")
+    print0(f"--init-from: loading model weights only from '{init_from_tag}'" +
+           (f" step {init_from_step}" if init_from_step is not None else " (latest step)") +
+           " - fresh optimizer, fresh step counter, fresh LR schedule")
+    model, _, _ = load_model_from_dir(src_checkpoints_dir, device, phase="train", model_tag=init_from_tag, step=init_from_step)
+    model_config = model.config
+    # Model config comes from the checkpoint, not from the architecture flags. If the user
+    # explicitly passed one and it disagrees with the checkpoint, fail loudly instead of
+    # silently reshaping the run around whatever the checkpoint happens to be.
+    passed = lambda flag: any(a == flag or a.startswith(flag + "=") for a in sys.argv[1:])
+    depth_explicit = passed("--depth")
+    aspect_explicit = passed("--aspect-ratio")
+    # ve_layers and sequence_len are architecture, not schedule: value-embedding placement
+    # decides which tables exist at all (build_model warns that a mismatch silently leaves
+    # them randomly initialized), and the rotary cache is sized from the checkpoint's
+    # sequence_len, so a longer --max-seq-len would feed positions the model never saw.
+    if passed("--ve-layers") and args.ve_layers != model_config.ve_layers:
+        raise ValueError(f"--ve-layers={args.ve_layers} disagrees with checkpoint '{init_from_tag}' (ve_layers={model_config.ve_layers}). Value-embedding placement is fixed at pretraining time; omit the flag.")
+    if passed("--max-seq-len") and args.max_seq_len != model_config.sequence_len:
+        raise ValueError(f"--max-seq-len={args.max_seq_len} disagrees with checkpoint '{init_from_tag}' (sequence_len={model_config.sequence_len}). Omit the flag to keep the checkpoint's context length.")
+    if depth_explicit and args.depth != model_config.n_layer:
+        raise ValueError(f"--depth={args.depth} disagrees with checkpoint '{init_from_tag}' (n_layer={model_config.n_layer}). Omit --depth to use the checkpoint's own config.")
+    if aspect_explicit:
+        expected_config = build_model_meta(model_config.n_layer).config
+        if expected_config.n_embd != model_config.n_embd or expected_config.n_head != model_config.n_head:
+            raise ValueError(f"--aspect-ratio={args.aspect_ratio} disagrees with checkpoint '{init_from_tag}' (n_embd={model_config.n_embd}, n_head={model_config.n_head}). Omit --aspect-ratio to use the checkpoint's own config.")
+    default_tag = f"{init_from_tag}_cpt"
+    output_dirname = args.model_tag if args.model_tag else default_tag
+    if not args.model_tag:
+        print0(f"No --model-tag given for this CPT run; naming it '{output_dirname}'")
+    if output_dirname == init_from_tag:
+        raise ValueError(f"--model-tag ('{output_dirname}') must differ from --init-from's source tag ('{init_from_tag}') so the CPT run doesn't overwrite the source checkpoint.")
+else:
+    model = build_model_meta(args.depth) # 1) Build on meta device (only shapes/dtypes, no data)
+    model_config = model.config
+    model.to_empty(device=device) # 2) All tensors get storage on target device but with uninitialized (garbage) data
+    model.init_weights() # 3) All tensors get initialized
+    output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
+
 model_config_kwargs = asdict(model_config)
 print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
-model.to_empty(device=device) # 2) All tensors get storage on target device but with uninitialized (garbage) data
-model.init_weights() # 3) All tensors get initialized
-
-# If we are resuming, overwrite the model parameters with those of the checkpoint
-base_dir = get_base_dir()
-output_dirname = args.model_tag if args.model_tag else f"d{args.depth}" # e.g. d12
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
+
+# If we are resuming (SAME run), overwrite the model parameters with those of the checkpoint.
+# Note --init-from never sets `resuming` - it already loaded weights above and step stays 0.
 resuming = args.resume_from_step != -1
 if resuming:
     print0(f"Resuming optimization from step {args.resume_from_step}")
@@ -344,8 +390,9 @@ if scaler is not None:
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
-train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, buffer_size=5000)
-build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device, buffer_size=5000)
+data_dir = args.data_dir or None # empty string = today's merge-everything behavior
+train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict, buffer_size=5000, data_dir=data_dir)
+build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device, buffer_size=5000, data_dir=data_dir)
 x, y, dataloader_state_dict = next(train_loader) # kick off load of the very first batch of data
 
 # -----------------------------------------------------------------------------

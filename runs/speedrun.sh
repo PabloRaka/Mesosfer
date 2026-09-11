@@ -61,10 +61,9 @@ python -m mesosfer.utils.report reset
 # each shard is ~100MB of text (compressed), so this is about ~800MB of data on disk
 # look at dev/repackage_data_reference.py for details on how this data was prepared
 python -m scripts.data.prepare_data --download-climbmix 8
-# Immediately also kick off downloading more shards in the background while tokenizer trains
-# Approximately 150 shards are needed for GPT-2 capability pretraining, add 20 for padding.
-# The maximum total number of shards available in the entire dataset is 6542.
-python -m scripts.data.prepare_data --download-climbmix 170 &
+# Immediately also kick off the full pretraining data prep (download+interleave, sized for
+# depth 16) in the background while the tokenizer trains.
+python -m scripts.data.prepare_data --d16 &
 DATASET_DOWNLOAD_PID=$!
 # train the tokenizer with vocab size 96K = 98304 on ~2B characters of data
 python -m scripts.train.tok_train
@@ -76,13 +75,14 @@ python -m scripts.eval.tok_eval
 echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
-# d24 model with improved training config:
+# d16 model with improved training config:
 #   --target-param-data-ratio=10  : compromise between speedrun (8, undertrained) and compute-optimal (12)
-#   --warmup-steps=200            : longer warmup needed for d24 (~500M params) to stabilize Muon momentum buffer
+#   --ve-layers=2                 : caps value-embedding tables at 3, since the default (-1 -> 8 tables)
+#                                    would outweigh the ~805M-param transformer matrices at this depth
 #   --window-pattern=L            : full attention (required for ROCm FA2; on NVIDIA 'SSL' is faster)
-torchrun --standalone --nproc_per_node=8 -m scripts.train.base_train -- --depth=24 --target-param-data-ratio=10 --device-batch-size=16 --warmup-steps=200 --window-pattern=L --fp8 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=8 -m scripts.train.base_train -- --depth=16 --aspect-ratio=128 --ve-layers=2 --target-param-data-ratio=10 --device-batch-size=32 --window-pattern=L --fp8 --run=$WANDB_RUN
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-torchrun --standalone --nproc_per_node=8 -m scripts.eval.base_eval -- --device-batch-size=16
+torchrun --standalone --nproc_per_node=8 -m scripts.eval.base_eval -- --model-tag=d16 --device-batch-size=32
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)

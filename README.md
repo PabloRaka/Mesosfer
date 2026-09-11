@@ -130,18 +130,20 @@ python -m scripts.eval.tok_eval
 Requires Steps 2a, 2b, and 3 to be complete.
 
 ```bash
-# Depth 32 (~13.7B params @ 96K vocab; ~9.3B with --ve-layers=4) — ~100B tokens at ratio=15
+# Depth 16 (~2.82B params @ 96K vocab with default value embeddings; use --ve-layers=2 since
+# VE tables otherwise outweigh the transformer at this depth) — ~10B tokens at ratio=10
 python -m scripts.train.base_train \
-    --depth=32 \
-    --target-param-data-ratio=15 \
-    --ve-layers=4 \
+    --depth=16 \
+    --aspect-ratio=128 \
+    --target-param-data-ratio=10 \
+    --ve-layers=2 \
     --grad-checkpoint \
     --device-batch-size=32 \
     --warmup-steps=500 \
     --window-pattern=L \
     --save-every=1000 \
     --core-metric-every=1000 \
-    --run=d32_run
+    --run=d16_run
 
 # Or use the full pipeline script (handles setup + tokenizer + pretrain + SFT)
 WANDB_RUN=my_run bash runs/speedrun.sh
@@ -156,7 +158,7 @@ WANDB_RUN=my_run bash runs/speedrun.sh
 
 ```bash
 python -m scripts.eval.base_eval \
-    --model-tag d32 \
+    --model-tag d16 \
     --device-batch-size 32
 ```
 
@@ -212,7 +214,7 @@ python -m scripts.chat.chat_web
 python -m scripts.chat.chat_web --num-gpus 4
 
 # Web UI — load specific checkpoint
-python -m scripts.chat.chat_web --model-tag d24 --step 14000
+python -m scripts.chat.chat_web --model-tag d16 --step 14000
 ```
 
 The Web UI includes:
@@ -450,6 +452,7 @@ num_heads = model_dim / head_dim
 | Depth | Aspect Ratio | Model Dim | ~Total Params | Dataset needed (ratio=10) | Covered by ~100B dataset? |
 | -------| --------------| -----------| ---------------| ---------------------------| ---------------------------|
 | 16    | 64           | 1024      | ~0.9B         | ~2.7B                     | ✅                         |
+| 16    | 128          | 2048      | ~2.82B        | ~10B                      | ✅                         |
 | 18    | 64           | 1152      | ~1.2B         | ~3.6B                     | ✅                         |
 | 20    | 64           | 1280      | ~1.5B         | ~4.8B                     | ✅                         |
 | 22    | 64           | 1408      | ~1.8B         | ~6.2B                     | ✅                         |
@@ -466,6 +469,7 @@ num_heads = model_dim / head_dim
 > For Chinchilla-optimal training (ratio=20), double the token requirements above.
 > Total params are at 96K vocab with default (legacy) value embeddings. `--ve-layers=K` cuts the vocab-sized
 > value-embedding tables substantially (e.g. d32 drops from ~13.7B to ~9.3B at `--ve-layers=4`), saving memory.
+> At depth 16, default `--ve-layers=-1` (8 VE tables) outweighs the ~805M-param transformer matrices — pass `--ve-layers=2` (3 tables) for a well-balanced ~1B-class model.
 
 To train a larger model, simply pass the desired depth and aspect ratio:
 

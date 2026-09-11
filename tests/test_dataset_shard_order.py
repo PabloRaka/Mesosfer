@@ -50,6 +50,93 @@ def test_val_split_is_unaffected(tmp_path, monkeypatch):
     assert seen == ["shard 19"]
 
 
+def test_val_prefixed_file_is_selected_regardless_of_position():
+    """prepare_data's val_shard.parquet must win over the last-file fallback, and it
+    can land anywhere in the aux+primary merged list (list_parquet_files puts aux dirs
+    first), not just at the end.
+    """
+    paths = ["aux/shard_00000.parquet", "aux/val_shard.parquet", "primary/shard_00001.parquet"]
+
+    assert dataset.split_parquet_paths(paths, "val") == ["aux/val_shard.parquet"]
+    train = dataset.split_parquet_paths(paths, "train")
+    assert "aux/val_shard.parquet" not in train
+    assert sorted(train) == ["aux/shard_00000.parquet", "primary/shard_00001.parquet"]
+
+
+def test_no_val_prefixed_file_falls_back_to_legacy_last_file():
+    """Corpora prepared before val_shard.parquet existed have no way to name their
+    validation shard, so this must reproduce the old last-file behavior exactly:
+    val is the last file, train is everything else (shuffled with the fixed seed).
+    """
+    paths = [f"shard_{i:05d}.parquet" for i in range(5)]
+    import random
+    expected_train = paths[:-1]
+    random.Random(dataset.SHARD_SHUFFLE_SEED).shuffle(expected_train)
+
+    assert dataset.split_parquet_paths(paths, "val") == paths[-1:]
+    assert dataset.split_parquet_paths(paths, "train") == expected_train
+
+
+def test_list_parquet_files_data_dir_does_not_merge_auxiliary(tmp_path, monkeypatch):
+    """--data-dir (CPT) must read only the given directory - auxiliary corpora that are
+    normally auto-merged into pretraining must NOT leak into a CPT run.
+    """
+    primary = tmp_path / "primary"
+    aux = tmp_path / "aux"
+    primary.mkdir()
+    aux.mkdir()
+    _write_shards(primary, 3)
+    _write_shards(aux, 2)
+    monkeypatch.setattr(dataset, "AUXILIARY_DATA_DIRS", [str(aux)])
+
+    result = dataset.list_parquet_files(data_dir=str(primary))
+
+    assert result == sorted(str(p) for p in primary.glob("*.parquet"))
+    assert all("aux" not in p for p in result)
+
+
+def test_dataloader_threads_data_dir_through(tmp_path, monkeypatch):
+    """base_train's --data-dir must reach list_parquet_files unchanged."""
+    from mesosfer.data import dataloader
+
+    _write_shards(tmp_path, 2)
+    paths = sorted(str(p) for p in tmp_path.glob("*.parquet"))
+    captured = {}
+
+    def fake_list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=True):
+        captured["data_dir"] = data_dir
+        return paths
+
+    monkeypatch.setattr(dataloader, "list_parquet_files", fake_list_parquet_files)
+
+    gen = dataloader._document_batches("train", None, 128, data_dir=str(tmp_path))
+    next(gen)
+
+    assert captured["data_dir"] == str(tmp_path)
+
+
+def test_dataloader_data_dir_none_is_default(tmp_path, monkeypatch):
+    """data_dir=None (the default) must produce the exact same list_parquet_files call as
+    before this flag existed - i.e. merge-everything behavior is untouched.
+    """
+    from mesosfer.data import dataloader
+
+    _write_shards(tmp_path, 2)
+    paths = sorted(str(p) for p in tmp_path.glob("*.parquet"))
+    captured = {}
+
+    def fake_list_parquet_files(data_dir=None, warn_on_legacy=False, include_auxiliary=True):
+        captured["data_dir"] = data_dir
+        return paths
+
+    monkeypatch.setattr(dataloader, "list_parquet_files", fake_list_parquet_files)
+
+    gen = dataloader._document_batches("train", None, 128) # data_dir omitted
+    next(gen)
+
+    assert captured["data_dir"] is None
+
+
 def test_pretrain_dataloader_uses_the_same_order():
     """base_train reads through dataloader._document_batches, not parquets_iter_batched.
 
