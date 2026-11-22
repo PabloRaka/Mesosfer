@@ -14,9 +14,9 @@ stages of **mesosfer**, kept in sync with the source of truth in code:
 
 | Mode                                             | Scaling Params | Ratio | Tokens Needed | Tokens Available | Status              |
 | :------------------------------------------------- | :--------------- | :------ | :-------------- | :----------------- | :-------------------- |
-| Speedrun (`--target-param-data-ratio=10`)        | ~6.8B          | 10×  | ~68B          | ~103B            | ✅ surplus          |
-| Recommended (`--target-param-data-ratio=15`)     | ~6.8B          | 15×  | ~103B         | ~103B            | ✅ ~covered (marginal) |
-| Compute-optimal (`--target-param-data-ratio=18`) | ~6.8B          | 18×  | ~123B         | ~103B            | ⚠️ under            |
+| Speedrun (`--target-param-data-ratio=10`)        | ~6.8B          | 10×  | ~68B          | ~157B            | ✅ surplus          |
+| Recommended (`--target-param-data-ratio=15`)     | ~6.8B          | 15×  | ~103B         | ~157B            | ✅ surplus          |
+| Compute-optimal (`--target-param-data-ratio=18`) | ~6.8B          | 18×  | ~123B         | ~157B            | ✅ surplus          |
 
 > **Depth 32 config:** `n_embd = 32 × 128 = 4096`, **96K vocab**, ~13.7B total params (legacy VE; ~9.3B with `--ve-layers=4`), ~6.8B scaling params (transformer matrices + lm_head, excl. embeddings).
 > Recommended: `--depth=32 --target-param-data-ratio=10` (~68B, comfortable surplus) or `=15` (~103B, marginal). Use `--ve-layers=4 --grad-checkpoint` to cut memory.
@@ -43,12 +43,12 @@ bucket; their share within `general` comes only from their `DOMAIN_SAMPLING_WEIG
 
 | Bucket           | Share | Sources                                              |
 | :----------------- | :------ | :----------------------------------------------------- |
-| General (EN)     | 50%   | `climbmix`, `wikipedia`, `fineweb_edu`, `wikipedia_id`, `fineweb2_id` |
+| General (EN + ID)| 50%   | `climbmix`, `wikipedia_id`, `fineweb2_id`            |
 | Code             | 25%   | `secure_code_*`, `code_*`, `metasploit`, `exploitdb` |
 | Cybersecurity    | 15%   | CVE feeds, threat intel, detection rules, local data |
 | Reasoning / Math | 10%   | `finemath`, `nemotron_cc_math`                       |
 
-> Total `max_tokens` available across all sources is still ~103B — the shares decide
+> Total `max_tokens` available across all sources is ~157B — the shares decide
 > how the run's budget is divided, `max_tokens` only caps how much a source can give.
 
 #### `--stage cpt` (`CPT_TARGET_SHARE`) — continued pretraining
@@ -129,7 +129,6 @@ the realized mix stays on target even though document lengths differ per domain.
 | `primus_nemotron_cc`        | Cybersecurity | 2.1    | 7.6B       | `trend-cybertron/Primus-Nemotron-CC`        | Cybersec text filtered from Nemotron-CC. |
 | `local_soc_synthetic`       | Cybersecurity | 2.1    | 1.44B      | `data/synthetic-soc/`                       | Synthetic SOC dialogues.                 |
 | `local_reverse_engineering` | Cybersecurity | 2.0    | 1.2B       | `data/reverse-engineering/`                 | RE/exploitation analysis.                |
-| `primus_reasoning`          | Cybersecurity | 2.0    | 1.5B       | `trendmicro-ailab/Primus-Reasoning`         | Distilled cybersec chain-of-thought.     |
 | `brightdata_cybersec`       | Cybersecurity | 2.0    | 500M       | brightdata_scraper                          | Real-time threat intel via proxy.        |
 | `project_zero`              | Cybersecurity | 2.0    | 40M        | rss                                         | Google Project Zero.                     |
 | `mandiant`                  | Cybersecurity | 2.0    | 40M        | rss                                         | Mandiant threat intel.                   |
@@ -171,13 +170,11 @@ the realized mix stays on target even though document lengths differ per domain.
 | `code_jupyter`              | Code          | 1.0    | 2.0B       | `bigcode/the-stack-dedup`                   | Notebooks — machine learning / AI code.  |
 | `nemotron_cc_math`          | Reasoning     | 1.0    | 18.0B      | `nvidia/Nemotron-CC-Math-v1` (`4plus`)      | High-quality math/reasoning corpus.      |
 | `finemath`                  | Reasoning     | 0.9    | 3.0B       | `HuggingFaceTB/finemath` (`finemath-4plus`) | Math reasoning.                          |
-| `fineweb_edu`               | General       | 0.7    | 4.0B       | `HuggingFaceFW/fineweb-edu` (`sample-10BT`) | Educational web content.                 |
-| `climbmix`                  | General       | 0.6    | 5.0B       | `karpathy/climbmix-400b-shuffle`            | General pretraining, suppressed.         |
-| `wikipedia`                 | General       | 0.5    | 3.0B       | `wikimedia/wikipedia` (`20231101.en`)       | English Wikipedia, suppressed.           |
-| `fineweb2_id`               | General       | 0.6    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
-| `wikipedia_id`              | General       | 0.5    | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
+| `climbmix`                  | General       | 1.0    | 60.0B      | `karpathy/climbmix-400b-shuffle`            | Primary EN general pretraining corpus.   |
+| `fineweb2_id`               | General       | 0.3    | 3.0B       | `HuggingFaceFW/fineweb-2` (`ind_Latn`)      | Indonesian web text.                     |
+| `wikipedia_id`              | General       | 0.15   | 0.2B       | `wikimedia/wikipedia` (`20231101.id`)       | Indonesian Wikipedia.                    |
 
-> **48 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
+> **50 sources total.** Instruction/chat/DPO-style datasets are **not** here — they live in the SFT pipeline (Section 3).
 
 > ⚠️ **Two `Max Tokens` columns above are headroom, not supply.** The five `local_*` sources
 > declare 1.2–1.44B each but the bundled files hold ~333K tokens combined, and the two
@@ -189,7 +186,7 @@ the realized mix stays on target even though document lengths differ per domain.
 > both stage profiles (no separate Indonesian bucket), so the tokenizer still learns real Indonesian
 > sub-words and the base model has a language foundation to build on, without eating a dedicated share
 > of the budget. The Indonesian SFT sets (Section 3) sit on top of it; SFT alone cannot teach a language
-> the base model never saw during pretraining. The two weights (0.5 / 0.6) only split their slice of
+> the base model never saw during pretraining. The two weights (0.15 / 0.3) only split their slice of
 > `general` between them. Their `max_tokens` (~3.2B combined) is the ceiling, so a large enough budget
 > will run them dry and the rest of `general` absorbs their share.
 
@@ -347,9 +344,9 @@ dependency on Llama-3 / OpenAI tool formats):
 
 | Token pair | Meaning | Supervised? |
 | :--- | :--- | :--- |
-| `<\|calc_start\|>` … `<\|calc_end\|>` | Inline expression evaluator — arithmetic and simple string ops, run by the engine at inference (not a Python REPL) | yes |
-| `<\|tool_start\|>` … `<\|tool_end\|>` | Generic named tool call. Payload is JSON `{"name": ..., "arguments": {...}}` — covers shell, network scanners, SQL, HTTP, etc. | yes |
-| `<\|output_start\|>` … `<\|output_end\|>` | Tool / REPL result returned from the environment | no (not supervised) |
+| `<\|think_start\|>` … `<\|think_end\|>` | Assistant internal reasoning / chain-of-thought block before answering or calling tools | yes |
+| `<\|tool_start\|>` … `<\|tool_end\|>` | Unified tool call. Payload is JSON `{"name": ..., "arguments": {...}}` (shell, network scanners, SQL, HTTP, etc.) or an inline math/string expression | yes |
+| `<\|output_start\|>` … `<\|output_end\|>` | Tool / evaluator result returned from the environment | no (not supervised) |
 
 Sources:
 - **Local** (`data/sft/`): `tool_calling_conversations_en.jsonl`, `mythos_tool_calling*.jsonl`, `tool_oriented_cyber_sft.jsonl` (generated by `dev/` scripts).

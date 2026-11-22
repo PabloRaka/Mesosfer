@@ -28,21 +28,21 @@ from mesosfer.model.flash_attention import flash_attn
 
 @dataclass
 class GPTConfig:
-    sequence_len: int = 2048
+    sequence_len: int = 8192
     vocab_size: int = 98304        # 96K = 96 × 1024 (matches tok_train default; always overridden in practice)
-    n_layer: int = 28              # Depth 28 for balanced reasoning (~380M params)
+    n_layer: int = 24              # Depth 24 default Transformer depth
     n_head: int = 12               # 12 heads for diverse attention patterns
     n_kv_head: int = 12            # Full attention (GQA-compatible, head_dim=64)
     n_embd: int = 768              # hidden_size 768
     # Sliding window attention pattern string, tiled across layers. Final layer always L.
-    # Characters: L=long (full context), S=short (quarter context = 512 tokens)
+    # Characters: L=long (full context), S=short (quarter context = 2048 tokens at seq 8192)
     # Pattern: SLSLSL alternating for depth 28 = 14 short + 14 long layers
     window_pattern: str = "SLSLSL"
     # Value-embedding placement (ResFormer-style). These tables are vocab-sized, so they
     # dominate parameter count at large vocab. Controls which layers get a value embedding:
     #   -1  => legacy: alternating layers (same parity as last) ~= ceil(n_layer/2) tables
     #   K>=0 => reduced: the first K layers + always the last layer
-    ve_layers: int = -1
+    ve_layers: int = 4
     # Activation (gradient) checkpointing: recompute each transformer block in backward
     # instead of storing its activations. Trades ~30% extra compute for a large activation
     # memory saving — needed to fit deep/wide models (e.g. d32+) in GPU memory.
@@ -497,15 +497,10 @@ class GPT(nn.Module):
             x = x - self.backout_lambda.to(x.dtype) * x_backout
         x = norm(x)
 
-        # Forward the lm_head (compute logits)
+        # Forward the lm_head (compute logits or chunked cross-entropy loss)
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
-        logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
-        logits = logits[..., :self.config.vocab_size] # slice to remove padding
-        logits = logits.float() # switch to fp32 for logit softcap and loss computation
-        logits = softcap * torch.tanh(logits / softcap) # squash the logits
-
         if targets is not None:
-            # training: given the targets, compute and return the loss.
+            # training/eval: compute loss without materializing full (B*T, vocab_size) logits
             # targets may legitimately contain -1 (ignore_index) for masked positions
             # (user/prompt/BOS/padding/tool-output tokens that must NOT be supervised).
             # Anything outside {-1} ∪ [0, vocab_size) indicates a real tokenizer/model
@@ -525,11 +520,57 @@ class GPT(nn.Module):
                         f"This means the tokenizer vocabulary does not match the model's "
                         f"vocab_size — retrain the tokenizer/model with matching vocab."
                     )
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
-            return loss
+            return self._chunked_cross_entropy(x, targets, softcap=softcap, reduction=loss_reduction)
         else:
             # inference: just return the logits directly
+            logits = self.lm_head(x) # (B, T, padded_vocab_size)
+            logits = logits[..., :self.config.vocab_size] # slice to remove padding
+            logits = logits.float() # switch to fp32 for logit softcap
+            logits = softcap * torch.tanh(logits / softcap) # squash the logits
             return logits
+
+    def _chunked_cross_entropy(self, x, targets, softcap=15, reduction='mean', chunk_size=2048):
+        """Compute softcapped lm_head + cross_entropy in token chunks.
+
+        Recomputes one (chunk_size, vocab_size) logits slice at a time via activation
+        checkpointing when gradients are enabled, cutting peak logits VRAM by 4x-32x
+        at large vocab (96K) and long context (8192) with mathematically identical loss.
+        """
+        if reduction not in ('mean', 'sum', 'none'):
+            raise ValueError(f"Unsupported loss_reduction: {reduction}")
+        vocab_size = self.config.vocab_size
+        x_flat = x.reshape(-1, x.size(-1))
+        t_flat = targets.reshape(-1)
+
+        def chunk_ce(x_c, t_c, red):
+            logits_c = self.lm_head(x_c)[..., :vocab_size].float()
+            logits_c = softcap * torch.tanh(logits_c / softcap)
+            return F.cross_entropy(logits_c, t_c, ignore_index=-1, reduction=red)
+
+        if x_flat.size(0) <= chunk_size:
+            return chunk_ce(x_flat, t_flat, reduction)
+
+        chunk_red = 'none' if reduction == 'none' else 'sum'
+        use_ckpt = torch.is_grad_enabled()
+        outs = []
+        for x_c, t_c in zip(x_flat.split(chunk_size, dim=0), t_flat.split(chunk_size, dim=0)):
+            if use_ckpt:
+                out = torch.utils.checkpoint.checkpoint(
+                    lambda xc, tc: chunk_ce(xc, tc, chunk_red),
+                    x_c, t_c,
+                    use_reentrant=False,
+                )
+            else:
+                out = chunk_ce(x_c, t_c, chunk_red)
+            outs.append(out)
+
+        if reduction == 'none':
+            return torch.cat(outs, dim=0)
+        loss_sum = torch.stack(outs).sum()
+        if reduction == 'sum':
+            return loss_sum
+        valid_count = (t_flat != -1).sum().to(loss_sum.dtype)
+        return loss_sum / valid_count
 
     @torch.inference_mode()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):

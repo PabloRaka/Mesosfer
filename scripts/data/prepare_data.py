@@ -464,13 +464,11 @@ DOMAIN_SAMPLING_WEIGHTS = {
     "zeek_scripts":            1.5,
     "brightdata_cybersec":     2.0,  # Real-time threat intel via BrightData Proxy/API
     "primus_seed":             2.2,  # Trend Micro curated cybersecurity seed corpus
-    # General knowledge (English)
-    "climbmix":                0.6,  # very large, keep proportion down
-    "wikipedia":               0.5,  # huge corpus, don't let it dominate
-    "fineweb_edu":             0.7,
+    # General knowledge (English — ClimbMix already covers FineWeb-Edu / Wikipedia quality mix)
+    "climbmix":                1.0,  # primary EN general corpus (bucket share capped by TARGET_DOMAIN_SHARE)
     # Indonesian — folded into the "general" bucket, weights only split it.
-    "wikipedia_id":            0.5,
-    "fineweb2_id":             0.6,
+    "wikipedia_id":            0.15,
+    "fineweb2_id":             0.3,
     # Code — important for secure coding
     "secure_code_python":      1.4,
     "secure_code_c":           1.4,
@@ -820,32 +818,12 @@ DATASET_SOURCES = {
     # =========================================================================
     "climbmix": {
         "hf_name": "karpathy/climbmix-400b-shuffle",
-        "description": "High-quality general pretraining data",
+        "description": "High-quality general pretraining data (covers FineWeb-Edu/Wikipedia EN)",
         "category": "general",
-        "max_tokens": 5_000_000_000,
+        "max_tokens": 60_000_000_000,
         "text_column": "text",
         "split": "train",
         "streaming": True,
-    },
-    "wikipedia": {
-        "hf_name": "wikimedia/wikipedia",
-        "description": "English Wikipedia articles",
-        "category": "general",
-        "max_tokens": 3_000_000_000,
-        "text_column": "text",
-        "split": "train",
-        "streaming": True,
-        "hf_subset": "20231101.en",
-    },
-    "fineweb_edu": {
-        "hf_name": "HuggingFaceFW/fineweb-edu",
-        "description": "Educational web content",
-        "category": "general",
-        "max_tokens": 4_000_000_000,
-        "text_column": "text",
-        "split": "train",
-        "streaming": True,
-        "hf_subset": "sample-10BT",
     },
     # Indonesian foundation. Deliberately small (~3.2B, ~3% of the mix): enough to give the
     # 96K tokenizer real Indonesian sub-words and to ground the base model, without displacing
@@ -2987,18 +2965,25 @@ def has_ve(layer_idx, n_layer, ve_layers=-1):
     return layer_idx < ve_layers or layer_idx == n_layer - 1
 
 
-def estimate_tokens_for_depth(depth, target_param_data_ratio=15, aspect_ratio=128, head_dim=128, ve_layers=-1):
+def estimate_tokens_for_depth(depth, target_param_data_ratio=15, aspect_ratio=128, head_dim=128, ve_layers=4, n_kv_head=-1):
     vocab_size = _get_vocab_size()
     padded_vocab_size = ((vocab_size + 63) // 64) * 64
     
     base_dim = depth * aspect_ratio
     model_dim = ((base_dim + head_dim - 1) // head_dim) * head_dim
     num_heads = model_dim // head_dim
-    num_kv_head = num_heads
+    if n_kv_head == 0:
+        num_kv_head = num_heads
+    elif n_kv_head < 0:
+        num_kv_head = num_heads // 4 if num_heads >= 8 and num_heads % 4 == 0 else num_heads
+    else:
+        num_kv_head = n_kv_head
     
     num_layers_with_ve = sum(1 for i in range(depth) if has_ve(i, depth, ve_layers))
     
-    transformer_matrices = 12 * model_dim * model_dim * depth + num_layers_with_ve * (12 * num_kv_head)
+    attn_proj = (2 * model_dim + 2 * num_kv_head * head_dim) * model_dim
+    mlp_proj = 8 * model_dim * model_dim
+    transformer_matrices = (attn_proj + mlp_proj) * depth + num_layers_with_ve * (12 * num_kv_head)
     lm_head = padded_vocab_size * model_dim
     num_scaling_params = transformer_matrices + lm_head
     

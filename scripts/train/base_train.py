@@ -48,12 +48,13 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
 # Model architecture
-parser.add_argument("--depth", type=int, default=32, help="depth of the Transformer model")
+parser.add_argument("--depth", type=int, default=24, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=128, help="model_dim = depth * aspect_ratio")
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
-parser.add_argument("--ve-layers", type=int, default=-1, help="value-embedding placement: -1 = legacy alternating (~half layers); K>=0 = first K layers + last layer only (cuts vocab-sized VE tables)")
+parser.add_argument("--n-kv-head", type=int, default=-1, help="number of KV heads for GQA (-1 = auto 4:1 GQA when num_heads >= 8 and divisible by 4; 0 = full MHA; K>0 = explicit KV heads)")
+parser.add_argument("--ve-layers", type=int, default=4, help="value-embedding placement: -1 = legacy alternating (~half layers); K>=0 = first K layers + last layer only (cuts vocab-sized VE tables)")
 parser.add_argument("--grad-checkpoint", action="store_true", help="enable activation/gradient checkpointing (recompute blocks in backward to save activation memory; ~30%% extra compute)")
-parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
+parser.add_argument("--max-seq-len", type=int, default=8192, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="L", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL'). Default 'L' is full attention — required for ROCm FA2 (Triton backend doesn't support sliding window backward pass yet). For NVIDIA, 'SSL' or 'SSSL' can save compute.")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
@@ -142,6 +143,16 @@ print0(f"Vocab size: {vocab_size:,}")
 # -----------------------------------------------------------------------------
 # Initialize the Model
 
+def resolve_n_kv_head(num_heads, n_kv_head_arg):
+    if n_kv_head_arg == 0:
+        return num_heads
+    if n_kv_head_arg < 0:
+        return num_heads // 4 if num_heads >= 8 and num_heads % 4 == 0 else num_heads
+    if n_kv_head_arg > num_heads or num_heads % n_kv_head_arg != 0:
+        raise ValueError(f"--n-kv-head={n_kv_head_arg} must be in [1, {num_heads}] and divide n_head={num_heads}")
+    return n_kv_head_arg
+
+
 def build_model_meta(depth):
     """Build a model on meta device for a given depth (shapes/dtypes only, no data)."""
     # Model dim is nudged up to nearest multiple of head_dim for clean division
@@ -149,9 +160,10 @@ def build_model_meta(depth):
     base_dim = depth * args.aspect_ratio
     model_dim = ((base_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
     num_heads = model_dim // args.head_dim
+    num_kv_heads = resolve_n_kv_head(num_heads, args.n_kv_head)
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
-        n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
+        n_layer=depth, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim,
         window_pattern=args.window_pattern, ve_layers=args.ve_layers,
         grad_checkpoint=args.grad_checkpoint,
     )
@@ -185,6 +197,10 @@ if args.init_from:
     # sequence_len, so a longer --max-seq-len would feed positions the model never saw.
     if passed("--ve-layers") and args.ve_layers != model_config.ve_layers:
         raise ValueError(f"--ve-layers={args.ve_layers} disagrees with checkpoint '{init_from_tag}' (ve_layers={model_config.ve_layers}). Value-embedding placement is fixed at pretraining time; omit the flag.")
+    if passed("--n-kv-head"):
+        req_kv = resolve_n_kv_head(model_config.n_head, args.n_kv_head)
+        if req_kv != model_config.n_kv_head:
+            raise ValueError(f"--n-kv-head={args.n_kv_head} (resolved {req_kv}) disagrees with checkpoint '{init_from_tag}' (n_kv_head={model_config.n_kv_head}). Omit the flag to keep the checkpoint's KV heads.")
     if passed("--max-seq-len") and args.max_seq_len != model_config.sequence_len:
         raise ValueError(f"--max-seq-len={args.max_seq_len} disagrees with checkpoint '{init_from_tag}' (sequence_len={model_config.sequence_len}). Omit the flag to keep the checkpoint's context length.")
     if depth_explicit and args.depth != model_config.n_layer:

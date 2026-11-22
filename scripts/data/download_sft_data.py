@@ -548,25 +548,39 @@ def convert_aquilax_reasoning(row) -> list | None:
     The source encodes the assistant turn as
     ``<|reserved_special_token_0|>{reasoning}<|reserved_special_token_1|>{answer}``
     using Llama-3 reserved tokens that mesosfer's tokenizer does not have.
-    We strip those tokens and join reasoning + answer into a single natural
-    chain-of-thought assistant response.
+    We map reasoning into a native ``think`` part (<|think_start|>...<|think_end|>)
+    followed by the final ``text`` answer.
     """
     raw = _extract_messages_field(row)
     if not raw:
         return None
-    cleaned_raw = []
+    result = []
     for msg in raw:
         if not isinstance(msg, dict):
-            continue
+            return None
+        role = _normalize_role(msg.get("role") or msg.get("from") or "")
         content = msg.get("content") or msg.get("value") or msg.get("text") or ""
-        if isinstance(content, str) and "<|reserved_special_token_0|>" in content:
+        if not role or not isinstance(content, str) or not content.strip():
+            continue
+        if role == "assistant" and "<|reserved_special_token_0|>" in content:
             parts = content.split("<|reserved_special_token_1|>")
             reasoning = parts[0].replace("<|reserved_special_token_0|>", "").strip()
             answer = parts[1].strip() if len(parts) > 1 else ""
-            content = f"{reasoning}\n\n{answer}".strip() if reasoning else answer
-            msg = {**msg, "content": content}
-        cleaned_raw.append(msg)
-    return _convert_messages(cleaned_raw)
+            if reasoning and answer:
+                result.append({"role": role, "content": [
+                    {"type": "think", "text": reasoning},
+                    {"type": "text", "text": answer},
+                ]})
+            elif answer or reasoning:
+                result.append({"role": role, "content": answer or reasoning})
+        else:
+            result.append({"role": role, "content": content.strip()})
+    if len(result) < 2:
+        return None
+    for i, msg in enumerate(result):
+        if msg["role"] != ("user" if i % 2 == 0 else "assistant"):
+            return None
+    return result
 
 
 _REASONING_FIELDS = (
@@ -581,9 +595,9 @@ _REASONING_FIELDS = (
 def convert_reasoning_trace(row) -> list | None:
     """Chain-of-thought datasets that keep prompt, reasoning and answer in separate columns.
 
-    The reasoning and the final answer are concatenated into one assistant turn so the
-    model learns to reason before answering. Rows missing the reasoning field still
-    convert (prompt -> answer), rows missing prompt or answer are dropped.
+    Reasoning is placed in a native ``think`` part (<|think_start|>...<|think_end|>)
+    before the final ``text`` answer. Rows missing the reasoning field still convert
+    (prompt -> answer), rows missing prompt or answer are dropped.
     """
     for p_key, r_key, a_key in _REASONING_FIELDS:
         prompt, answer = row.get(p_key), row.get(a_key)
@@ -594,10 +608,13 @@ def convert_reasoning_trace(row) -> list | None:
             continue
         reasoning = row.get(r_key)
         reasoning = reasoning.strip() if isinstance(reasoning, str) else ""
-        content = f"{reasoning}\n\n{answer}" if reasoning else answer
+        assistant_content = (
+            [{"type": "think", "text": reasoning}, {"type": "text", "text": answer}]
+            if reasoning else answer
+        )
         return [
             {"role": "user", "content": prompt},
-            {"role": "assistant", "content": content},
+            {"role": "assistant", "content": assistant_content},
         ]
     return None
 
@@ -717,7 +734,7 @@ def convert_openai_tool_calls(row) -> list | None:
         elif role == "assistant":
             reasoning = m.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning.strip():
-                parts.append({"type": "text", "text": reasoning.strip()})
+                parts.append({"type": "think", "text": reasoning.strip()})
             if isinstance(content, str) and content.strip():
                 parts.append({"type": "text", "text": content.strip()})
             for call in m.get("tool_calls") or []:

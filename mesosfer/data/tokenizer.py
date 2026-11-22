@@ -18,21 +18,20 @@ SPECIAL_TOKENS = [
     "<|user_end|>",
     "<|assistant_start|>", # assistant messages
     "<|assistant_end|>",
-    "<|calc_start|>", # assistant invokes the engine's inline expression evaluator
-    "<|calc_end|>",
-    "<|output_start|>", # evaluator / tool results fed back to the assistant
+    "<|think_start|>", # assistant internal reasoning / chain-of-thought block
+    "<|think_end|>",
+    "<|output_start|>", # tool results fed back to the assistant
     "<|output_end|>",
-    "<|tool_start|>", # assistant invokes a named tool (shell, nmap, sql, gcc, http, ...)
-    "<|tool_end|>",   # tool call payload is JSON: {"name": ..., "arguments": {...}}
+    "<|tool_start|>", # assistant invokes a tool (calc, shell, nmap, sql, gcc, http, ...)
+    "<|tool_end|>",   # tool call payload is JSON: {"name": ..., "arguments": {...}} or expression
 ]
 # NOTE: Every special token above is part of the actual train/inference protocol:
 # <|bos|> delimits pretraining documents (prepended per-doc by the dataloader); the
-# conversation/tool tokens are emitted by RustBPETokenizer.render_conversation during
-# SFT/RL. <|calc_*|> wraps the engine's inline expression evaluator — see use_calculator()
-# in mesosfer/eval/engine.py, which allows arithmetic and simple string ops only and is NOT a
-# general Python REPL. Anything heavier, including running C/C++/Rust, goes through
-# <|tool_start|>/<|tool_end|>: a generic named tool call (JSON name+arguments) so any tool
-# family (shell, network scanners, SQL, compilers, HTTP, ...) shares one token pair.
+# conversation/reasoning/tool tokens are emitted by RustBPETokenizer.render_conversation
+# during SFT/RL. Internal reasoning sits inside <|think_start|>/<|think_end|> (supervised).
+# All tool invocations (including math/calculator expressions and heavier tools like shell,
+# network scanners, SQL, compilers, HTTP, ...) go through the single pair
+# <|tool_start|>/<|tool_end|>, with results fed back inside <|output_start|>/<|output_end|>.
 #
 # The language is named inside the JSON payload and never gets its own token. That is also
 # what every open-weight model does — GLM-4.5, Qwen3, Llama 3.1, DeepSeek-V3, Mistral and
@@ -293,7 +292,7 @@ class RustBPETokenizer:
             pickle.dump(self.enc, f)
         print(f"Saved tokenizer encoding to {pickle_path}")
 
-    def render_conversation(self, conversation, max_tokens=2048):
+    def render_conversation(self, conversation, max_tokens=8192):
         """
         Tokenize a single Chat conversation (which we call a "doc" or "document" here).
         Returns:
@@ -355,19 +354,14 @@ class RustBPETokenizer:
                         if part["type"] == "text":
                             # string part => simply add the tokens
                             add_tokens(value_ids, 1)
-                        elif part["type"] == "calc":
-                            # python tool call => add the tokens inside <|calc_start|> and <|calc_end|>
-                            add_tokens(self.encode_special("<|calc_start|>"), 1)
+                        elif part["type"] == "think":
+                            # internal reasoning / CoT => tokens inside <|think_start|> and <|think_end|>
+                            # supervised: the assistant learns to reason before answering or calling tools
+                            add_tokens(self.encode_special("<|think_start|>"), 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(self.encode_special("<|calc_end|>"), 1)
-                        elif part["type"] == "calc_output":
-                                # python output => add the tokens inside <|output_start|> and <|output_end|>
-                            # none of these tokens are supervised because the tokens come from Python at test time
-                            add_tokens(self.encode_special("<|output_start|>"), 0)
-                            add_tokens(value_ids, 0)
-                            add_tokens(self.encode_special("<|output_end|>"), 0)
+                            add_tokens(self.encode_special("<|think_end|>"), 1)
                         elif part["type"] == "tool":
-                            # generic named tool call => tokens inside <|tool_start|> and <|tool_end|>
+                            # tool call => tokens inside <|tool_start|> and <|tool_end|>
                             # supervised: the assistant must learn to emit the tool call
                             add_tokens(self.encode_special("<|tool_start|>"), 1)
                             add_tokens(value_ids, 1)

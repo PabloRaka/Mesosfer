@@ -183,7 +183,7 @@ if loaded_checkpoint_step > 0:
 # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
 pretrain_user_config = meta.get("user_config", {})
 for name, fallback, source in [
-    ("max_seq_len",       2048,  meta),
+    ("max_seq_len",       8192,  meta),
     ("device_batch_size", 32,    meta),
     ("total_batch_size",  524288, meta),
     ("embedding_lr",      0.3,   pretrain_user_config),
