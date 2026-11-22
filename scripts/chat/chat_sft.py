@@ -111,6 +111,7 @@ parser.add_argument("--disable-cybersec-sft", action="store_true", help="disable
 parser.add_argument("--rules-epochs", type=int, default=4, help="epochs of rules.jsonl (behavioral/safety/format rules)")
 parser.add_argument("--tool-calling-epochs", type=int, default=24, help="epochs of tool_calling_conversations_en (calc/tool/subagent parts)")
 parser.add_argument("--instruction-following-epochs", type=int, default=4, help="epochs of instruction_following_conversations_en.jsonl (format/count/conciseness polish)")
+parser.add_argument("--sft-jsonl-dir", help="Use train.jsonl and validation.jsonl from this directory")
 parser.add_argument("--instruction-polish-only", action="store_true", help="train only on local identity/rules/instruction-following polish data")
 parser.add_argument("--safety-artifact-epochs", type=int, default=4, help="epochs of safety_artifact_conversations_en.jsonl (artifact-vs-attack boundary)")
 parser.add_argument("--safety-artifact-only", action="store_true", help="train only on local identity/rules/safety-artifact boundary data")
@@ -260,106 +261,123 @@ identity_conversations_en_filepath = os.path.join(sft_dir, "identity_conversatio
 rules_filepath = os.path.join(sft_dir, "rules.jsonl")
 instruction_following_filepath = os.path.join(sft_dir, "instruction_following_conversations_en.jsonl")
 safety_artifact_filepath = os.path.join(sft_dir, "safety_artifact_conversations_en.jsonl")
-if args.instruction_polish_only or args.safety_artifact_only:
-    train_tasks = [
-        CustomJSON(filepath=identity_conversations_filepath),
-    ]
-    mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
-    print0(f"{mode_name} mode: skipping broad SmolTalk/MMLU/GSM8K/spelling training tasks")
-elif args.local_sft_only:
-    train_tasks = [
-        CustomJSON(filepath=identity_conversations_filepath),
-        CustomJSON(filepath=identity_conversations_filepath),
-    ]
-    print0("Local SFT mode: training only on local SFT data mixture (skipping SmolTalk/MMLU/GSM8K/Spelling)")
+def build_default_train_tasks():
+    if args.instruction_polish_only or args.safety_artifact_only:
+        train_tasks = [
+            CustomJSON(filepath=identity_conversations_filepath),
+        ]
+        mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
+        print0(f"{mode_name} mode: skipping broad SmolTalk/MMLU/GSM8K/spelling training tasks")
+    elif args.local_sft_only:
+        train_tasks = [
+            CustomJSON(filepath=identity_conversations_filepath),
+            CustomJSON(filepath=identity_conversations_filepath),
+        ]
+        print0("Local SFT mode: training only on local SFT data mixture (skipping SmolTalk/MMLU/GSM8K/Spelling)")
+    else:
+        train_tasks = [
+            SmolTalk(split="train"), # 460K rows of general conversations
+            CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
+            CustomJSON(filepath=identity_conversations_filepath), # 2 epochs of these
+            *[MMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)], # 100K rows per epoch
+            *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)], # 8K rows per epoch
+            SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
+            SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
+        ]
+
+    if args.include_english_sft and os.path.exists(identity_conversations_en_filepath):
+        train_tasks.extend([
+            CustomJSON(filepath=identity_conversations_en_filepath),
+            CustomJSON(filepath=identity_conversations_en_filepath),
+        ])
+        print0(f"Added identity_conversations_en.jsonl: 2 epoch(s) from {identity_conversations_en_filepath}")
+    elif args.include_english_sft:
+        print0(f"WARNING: identity_conversations_en.jsonl not found at {identity_conversations_en_filepath}, skipping")
+
+    # Add rules.jsonl if it exists and rules_epochs > 0
+    if args.rules_epochs > 0 and os.path.exists(rules_filepath):
+        rules_tasks = [CustomJSON(filepath=rules_filepath) for _ in range(args.rules_epochs)]
+        train_tasks.extend(rules_tasks)
+        print0(f"Added rules.jsonl: {args.rules_epochs} epoch(s) from {rules_filepath}")
+    elif args.rules_epochs > 0:
+        print0(f"WARNING: rules.jsonl not found at {rules_filepath}, skipping")
+
+    # Add safety artifact boundary data (synthetic artifacts allowed, attack automation refused)
+    if args.safety_artifact_epochs > 0 and os.path.exists(safety_artifact_filepath):
+        safety_artifact_tasks = [CustomJSON(filepath=safety_artifact_filepath) for _ in range(args.safety_artifact_epochs)]
+        train_tasks.extend(safety_artifact_tasks)
+        print0(f"Added safety_artifact_conversations_en.jsonl: {args.safety_artifact_epochs} epoch(s) from {safety_artifact_filepath}")
+    elif args.safety_artifact_epochs > 0:
+        print0(f"WARNING: safety_artifact_conversations_en.jsonl not found at {safety_artifact_filepath}, skipping")
+
+    # Add instruction-following polish data (exact counts, no-code constraints, JSON-only, concise answers)
+    if not args.safety_artifact_only and args.instruction_following_epochs > 0 and os.path.exists(instruction_following_filepath):
+        instruction_tasks = [CustomJSON(filepath=instruction_following_filepath) for _ in range(args.instruction_following_epochs)]
+        train_tasks.extend(instruction_tasks)
+        print0(f"Added instruction_following_conversations_en.jsonl: {args.instruction_following_epochs} epoch(s) from {instruction_following_filepath}")
+    elif not args.safety_artifact_only and args.instruction_following_epochs > 0:
+        print0(f"WARNING: instruction_following_conversations_en.jsonl not found at {instruction_following_filepath}, skipping")
+
+    # Add cybersecurity SFT mixture (preserves cybersec capability from pretraining)
+    if args.instruction_polish_only or args.safety_artifact_only:
+        mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
+        print0(f"{mode_name} mode: skipping broad cybersec SFT mixture")
+    elif not args.disable_cybersec_sft:
+        cybersec_tasks = build_cybersec_sft_tasks(
+            cyber_defensive_epochs=args.cyber_defensive_epochs,
+            cloud_security_epochs=args.cloud_security_epochs,
+            multi_turn_soc_epochs=args.multi_turn_soc_epochs,
+            tool_oriented_epochs=args.tool_oriented_epochs,
+            tool_calling_epochs=args.tool_calling_epochs,
+            mythos_epochs=args.mythos_epochs,
+            mythos_tool_calling_epochs=args.mythos_tool_calling_epochs,
+            mesosfer_validation_epochs=args.mesosfer_validation_epochs,
+            gemini_teacher_epochs=args.gemini_teacher_epochs,
+            chat_history_epochs=args.chat_history_epochs,
+            real_agentic_epochs=args.real_agentic_epochs,
+            primus_instruct_epochs=args.primus_instruct_epochs,
+            primus_reasoning_epochs=args.primus_reasoning_epochs,
+            cybernative_vuln_epochs=args.cybernative_vuln_epochs,
+            openhermes_epochs=args.openhermes_epochs,
+            ultrachat_epochs=args.ultrachat_epochs,
+            trendyol_cyber_epochs=args.trendyol_cyber_epochs,
+            tiamz_cybersec_epochs=args.tiamz_cybersec_epochs,
+            alpaca_indonesian_epochs=args.alpaca_indonesian_epochs,
+            alpaca_gpt4_indonesian_epochs=args.alpaca_gpt4_indonesian_epochs,
+            magpie_reasoning_epochs=args.magpie_reasoning_epochs,
+            open_thoughts_epochs=args.open_thoughts_epochs,
+            nist_cybersec_epochs=args.nist_cybersec_epochs,
+            fenrir_v2_epochs=args.fenrir_v2_epochs,
+            code_feedback_epochs=args.code_feedback_epochs,
+            numinamath_cot_epochs=args.numinamath_cot_epochs,
+            aquilax_security_reasoning_epochs=args.aquilax_security_reasoning_epochs,
+            xlam_function_calling_epochs=args.xlam_function_calling_epochs,
+            include_english=bool(args.include_english_sft),
+            sft_dir=sft_dir,
+        )
+        train_tasks.extend(cybersec_tasks)
+        print0(f"Added cybersec SFT: {len(cybersec_tasks)} task instances, {total_cybersec_rows(cybersec_tasks):,} total rows")
+    else:
+        print0("Cybersec SFT disabled via --disable-cybersec-sft")
+
+    return train_tasks
+
+
+if args.sft_jsonl_dir:
+    train_tasks = [CustomJSON(filepath=os.path.join(args.sft_jsonl_dir, "train.jsonl"))]
+    if not len(train_tasks[0]):
+        parser.error("--sft-jsonl-dir requires a nonempty train.jsonl")
 else:
-    train_tasks = [
-        SmolTalk(split="train"), # 460K rows of general conversations
-        CustomJSON(filepath=identity_conversations_filepath), # 1000 rows of synthetic identity conversations
-        CustomJSON(filepath=identity_conversations_filepath), # 2 epochs of these
-        *[MMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)], # 100K rows per epoch
-        *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)], # 8K rows per epoch
-        SimpleSpelling(size=200000, split="train"), # 200K rows of Simple Spelling (e.g. spell the word 'apple')
-        SpellingBee(size=80000, split="train"), # 80K rows of Spelling Bee (e.g. how many 'r' are in 'strawberry'?)
-    ]
+    train_tasks = build_default_train_tasks()
 
-if args.include_english_sft and os.path.exists(identity_conversations_en_filepath):
-    train_tasks.extend([
-        CustomJSON(filepath=identity_conversations_en_filepath),
-        CustomJSON(filepath=identity_conversations_en_filepath),
-    ])
-    print0(f"Added identity_conversations_en.jsonl: 2 epoch(s) from {identity_conversations_en_filepath}")
-elif args.include_english_sft:
-    print0(f"WARNING: identity_conversations_en.jsonl not found at {identity_conversations_en_filepath}, skipping")
-
-# Add rules.jsonl if it exists and rules_epochs > 0
-if args.rules_epochs > 0 and os.path.exists(rules_filepath):
-    rules_tasks = [CustomJSON(filepath=rules_filepath) for _ in range(args.rules_epochs)]
-    train_tasks.extend(rules_tasks)
-    print0(f"Added rules.jsonl: {args.rules_epochs} epoch(s) from {rules_filepath}")
-elif args.rules_epochs > 0:
-    print0(f"WARNING: rules.jsonl not found at {rules_filepath}, skipping")
-
-# Add safety artifact boundary data (synthetic artifacts allowed, attack automation refused)
-if args.safety_artifact_epochs > 0 and os.path.exists(safety_artifact_filepath):
-    safety_artifact_tasks = [CustomJSON(filepath=safety_artifact_filepath) for _ in range(args.safety_artifact_epochs)]
-    train_tasks.extend(safety_artifact_tasks)
-    print0(f"Added safety_artifact_conversations_en.jsonl: {args.safety_artifact_epochs} epoch(s) from {safety_artifact_filepath}")
-elif args.safety_artifact_epochs > 0:
-    print0(f"WARNING: safety_artifact_conversations_en.jsonl not found at {safety_artifact_filepath}, skipping")
-
-# Add instruction-following polish data (exact counts, no-code constraints, JSON-only, concise answers)
-if not args.safety_artifact_only and args.instruction_following_epochs > 0 and os.path.exists(instruction_following_filepath):
-    instruction_tasks = [CustomJSON(filepath=instruction_following_filepath) for _ in range(args.instruction_following_epochs)]
-    train_tasks.extend(instruction_tasks)
-    print0(f"Added instruction_following_conversations_en.jsonl: {args.instruction_following_epochs} epoch(s) from {instruction_following_filepath}")
-elif not args.safety_artifact_only and args.instruction_following_epochs > 0:
-    print0(f"WARNING: instruction_following_conversations_en.jsonl not found at {instruction_following_filepath}, skipping")
-
-# Add cybersecurity SFT mixture (preserves cybersec capability from pretraining)
-if args.instruction_polish_only or args.safety_artifact_only:
-    mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
-    print0(f"{mode_name} mode: skipping broad cybersec SFT mixture")
-elif not args.disable_cybersec_sft:
-    cybersec_tasks = build_cybersec_sft_tasks(
-        cyber_defensive_epochs=args.cyber_defensive_epochs,
-        cloud_security_epochs=args.cloud_security_epochs,
-        multi_turn_soc_epochs=args.multi_turn_soc_epochs,
-        tool_oriented_epochs=args.tool_oriented_epochs,
-        tool_calling_epochs=args.tool_calling_epochs,
-        mythos_epochs=args.mythos_epochs,
-        mythos_tool_calling_epochs=args.mythos_tool_calling_epochs,
-        mesosfer_validation_epochs=args.mesosfer_validation_epochs,
-        gemini_teacher_epochs=args.gemini_teacher_epochs,
-        chat_history_epochs=args.chat_history_epochs,
-        real_agentic_epochs=args.real_agentic_epochs,
-        primus_instruct_epochs=args.primus_instruct_epochs,
-        primus_reasoning_epochs=args.primus_reasoning_epochs,
-        cybernative_vuln_epochs=args.cybernative_vuln_epochs,
-        openhermes_epochs=args.openhermes_epochs,
-        ultrachat_epochs=args.ultrachat_epochs,
-        trendyol_cyber_epochs=args.trendyol_cyber_epochs,
-        tiamz_cybersec_epochs=args.tiamz_cybersec_epochs,
-        alpaca_indonesian_epochs=args.alpaca_indonesian_epochs,
-        alpaca_gpt4_indonesian_epochs=args.alpaca_gpt4_indonesian_epochs,
-        magpie_reasoning_epochs=args.magpie_reasoning_epochs,
-        open_thoughts_epochs=args.open_thoughts_epochs,
-        nist_cybersec_epochs=args.nist_cybersec_epochs,
-        fenrir_v2_epochs=args.fenrir_v2_epochs,
-        code_feedback_epochs=args.code_feedback_epochs,
-        numinamath_cot_epochs=args.numinamath_cot_epochs,
-        aquilax_security_reasoning_epochs=args.aquilax_security_reasoning_epochs,
-        xlam_function_calling_epochs=args.xlam_function_calling_epochs,
-        include_english=bool(args.include_english_sft),
-        sft_dir=sft_dir,
-    )
-    train_tasks.extend(cybersec_tasks)
-    print0(f"Added cybersec SFT: {len(cybersec_tasks)} task instances, {total_cybersec_rows(cybersec_tasks):,} total rows")
-else:
-    print0("Cybersec SFT disabled via --disable-cybersec-sft")
 
 train_dataset = TaskMixture(train_tasks)
-if args.local_sft_only:
+if args.sft_jsonl_dir:
+    validation = CustomJSON(filepath=os.path.join(args.sft_jsonl_dir, "validation.jsonl"))
+    if not len(validation):
+        parser.error("--sft-jsonl-dir requires a nonempty validation.jsonl")
+    val_dataset = TaskMixture([validation])
+elif args.local_sft_only:
     print0(f"Training mixture (local SFT): {len(train_dataset):,} rows")
     val_tasks = []
     val_id = os.path.join(sft_dir, "mesosfer_validation_conversations.jsonl")

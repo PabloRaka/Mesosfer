@@ -116,6 +116,29 @@ def test_render_conversation_mask_and_structure(tok):
     assert any(tid == assistant_end and m == 1 for tid, m in zip(ids, mask))
 
 
+def test_render_text_with_legacy_special_tokens(tok, monkeypatch):
+    legacy_markers = {"user_start", "user_end", "assistant_start", "assistant_end"}
+    encode_special = tok.encode_special
+
+    def legacy_encode_special(text):
+        if text[2:-2] not in legacy_markers:
+            raise KeyError(text)
+        return encode_special(text)
+
+    monkeypatch.setattr(tok, "encode_special", legacy_encode_special)
+    for content in ("Ready.", [{"type": "text", "text": "Ready."}]):
+        conversation = {"messages": [
+            {"role": "user", "content": "Status?"},
+            {"role": "assistant", "content": content},
+        ]}
+        ids, mask = tok.render_conversation(conversation)
+        assert ids[-1] == encode_special("<|assistant_end|>")
+        assert mask[-1] == 1
+        assert [tid for tid, label in zip(ids, mask) if label] == (
+            tok.encode("Ready.") + [encode_special("<|assistant_end|>")]
+        )
+
+
 def test_render_conversation_system_message_merged(tok):
     conv = {"messages": [
         {"role": "system", "content": "You are a SOC analyst."},
