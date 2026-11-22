@@ -321,13 +321,10 @@ class RustBPETokenizer:
             messages = conversation["messages"]
         assert len(messages) >= 1, f"Conversation has less than 1 message: {messages}"
 
-        # fetch all the special tokens we need
+        # Text-only tokenizers may lack calculator and tool markers.
         bos = self.get_bos_token_id()
         user_start, user_end = self.encode_special("<|user_start|>"), self.encode_special("<|user_end|>")
         assistant_start, assistant_end = self.encode_special("<|assistant_start|>"), self.encode_special("<|assistant_end|>")
-        calc_start, calc_end = self.encode_special("<|calc_start|>"), self.encode_special("<|calc_end|>")
-        output_start, output_end = self.encode_special("<|output_start|>"), self.encode_special("<|output_end|>")
-        tool_start, tool_end = self.encode_special("<|tool_start|>"), self.encode_special("<|tool_end|>")
 
         # now we can tokenize the conversation
         add_tokens(bos, 0)
@@ -360,27 +357,27 @@ class RustBPETokenizer:
                             add_tokens(value_ids, 1)
                         elif part["type"] == "calc":
                             # python tool call => add the tokens inside <|calc_start|> and <|calc_end|>
-                            add_tokens(calc_start, 1)
+                            add_tokens(self.encode_special("<|calc_start|>"), 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(calc_end, 1)
+                            add_tokens(self.encode_special("<|calc_end|>"), 1)
                         elif part["type"] == "calc_output":
                                 # python output => add the tokens inside <|output_start|> and <|output_end|>
                             # none of these tokens are supervised because the tokens come from Python at test time
-                            add_tokens(output_start, 0)
+                            add_tokens(self.encode_special("<|output_start|>"), 0)
                             add_tokens(value_ids, 0)
-                            add_tokens(output_end, 0)
+                            add_tokens(self.encode_special("<|output_end|>"), 0)
                         elif part["type"] == "tool":
                             # generic named tool call => tokens inside <|tool_start|> and <|tool_end|>
                             # supervised: the assistant must learn to emit the tool call
-                            add_tokens(tool_start, 1)
+                            add_tokens(self.encode_special("<|tool_start|>"), 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(tool_end, 1)
+                            add_tokens(self.encode_special("<|tool_end|>"), 1)
                         elif part["type"] == "tool_output":
                             # tool result => tokens inside <|output_start|> and <|output_end|>
                             # not supervised: the result comes from the environment at test time
-                            add_tokens(output_start, 0)
+                            add_tokens(self.encode_special("<|output_start|>"), 0)
                             add_tokens(value_ids, 0)
-                            add_tokens(output_end, 0)
+                            add_tokens(self.encode_special("<|output_end|>"), 0)
                         else:
                             raise ValueError(f"Unknown part type: {part['type']}")
                 else:
