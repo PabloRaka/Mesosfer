@@ -1,0 +1,25 @@
+[package]
+name = "fast_prepare"
+version = "0.1.0"
+edition = "2021"
+description = "High-throughput multi-threaded Rust pretraining dataset preparer for Mesosfer"
+
+[dependencies]
+aho-corasick = "1.1"
+anyhow = "1.0"
+arrow-array = "53"
+arrow-schema = "53"
+bytes = "1.7"
+clap = { version = "4.5", features = ["derive"] }
+crossbeam-channel = "0.5"
+flate2 = "1.0"
+parquet = { version = "53", default-features = false, features = ["arrow", "snap", "zstd", "flate2"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

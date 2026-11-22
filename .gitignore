@@ -62,3 +62,6 @@ scripts/download_sft_direct.py
 # Generated benchmark cards
 benchmark_*.html
 benchmark_card.html
+
+# Rust build artifacts
+tools/fast_prepare/target/
