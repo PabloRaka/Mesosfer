@@ -92,6 +92,14 @@ impl Bucket {
             Bucket::Reasoning => "reasoning",
         }
     }
+    fn idx(self) -> usize {
+        match self {
+            Bucket::General => 0,
+            Bucket::Code => 1,
+            Bucket::Cybersecurity => 2,
+            Bucket::Reasoning => 3,
+        }
+    }
     fn target_share(self) -> f64 {
         match self {
             Bucket::General => 0.50,
@@ -232,13 +240,14 @@ struct FileTask {
     source_name: &'static str,
     repo: &'static str,
     path: String,
+    est_chars: u64,
     text_col: &'static str,
     bucket: Bucket,
 }
 
 struct SourceState {
     spec: SourceSpec,
-    files: VecDeque<String>,
+    files: VecDeque<(String, u64)>,
     chars_cap: u64,
     chars_est_dispatched: u64,
     chars_actual: u64,
@@ -253,15 +262,24 @@ struct Scheduler {
 }
 
 impl Scheduler {
-    fn next_task(&mut self) -> Option<FileTask> {
-        // Pick bucket with lowest completion ratio (dispatched / target) that still has files
+    fn next_task(&mut self, bucket_written: &[AtomicU64; 4], source_written: &[AtomicU64]) -> Option<FileTask> {
+        // Pick bucket with lowest completion ratio (dispatched / target) that is still under target
         let mut best_bucket: Option<(Bucket, f64)> = None;
         for b in Bucket::ALL {
-            let target = *self.bucket_target_chars.get(&b).unwrap_or(&1) as f64;
-            let disp = *self.bucket_dispatched_chars.get(&b).unwrap_or(&0) as f64;
-            let ratio = disp / target.max(1.0);
-            let has_work = self.sources.iter().any(|s| {
-                s.spec.bucket == b && !s.files.is_empty() && s.chars_est_dispatched < s.chars_cap
+            let target = *self.bucket_target_chars.get(&b).unwrap_or(&1);
+            if bucket_written[b.idx()].load(Ordering::Relaxed) >= target {
+                continue;
+            }
+            let disp = *self.bucket_dispatched_chars.get(&b).unwrap_or(&0);
+            if disp >= target + target / 20 {
+                continue;
+            }
+            let ratio = (disp as f64) / (target.max(1) as f64);
+            let has_work = self.sources.iter().enumerate().any(|(i, s)| {
+                s.spec.bucket == b
+                    && !s.files.is_empty()
+                    && s.chars_est_dispatched < s.chars_cap
+                    && source_written[i].load(Ordering::Relaxed) < s.chars_cap
             });
             if !has_work {
                 continue;
@@ -272,10 +290,14 @@ impl Scheduler {
         }
         let bucket = best_bucket?.0;
 
-        // Inside the bucket, pick source with lowest (dispatched / weight)
+        // Inside the bucket, pick source with lowest (dispatched / weight) still under its cap
         let mut best_src: Option<(usize, f64)> = None;
         for (idx, s) in self.sources.iter().enumerate() {
-            if s.spec.bucket != bucket || s.files.is_empty() || s.chars_est_dispatched >= s.chars_cap {
+            if s.spec.bucket != bucket
+                || s.files.is_empty()
+                || s.chars_est_dispatched >= s.chars_cap
+                || source_written[idx].load(Ordering::Relaxed) >= s.chars_cap
+            {
                 continue;
             }
             let score = (s.chars_est_dispatched as f64) / s.spec.weight.max(0.01);
@@ -285,9 +307,9 @@ impl Scheduler {
         }
         let idx = best_src?.0;
         let s = &mut self.sources[idx];
-        let path = s.files.pop_front()?;
-        // Reserve ~120M chars estimate while file is in flight; corrected upon actual parse
-        let est = 120_000_000u64;
+        let (path, fsize) = s.files.pop_front()?;
+        // Estimate uncompressed chars from remote compressed file size (~3x expansion for parquet/gz)
+        let est = (fsize.saturating_mul(3)).clamp(20_000_000, 4_000_000_000);
         s.chars_est_dispatched += est;
         *self.bucket_dispatched_chars.entry(bucket).or_insert(0) += est;
         Some(FileTask {
@@ -295,19 +317,19 @@ impl Scheduler {
             source_name: s.spec.name,
             repo: s.spec.repo,
             path,
+            est_chars: est,
             text_col: s.spec.text_col,
             bucket,
         })
     }
 
-    fn report_actual(&mut self, source_idx: usize, bucket: Bucket, docs: u64, chars: u64) {
-        let est = 120_000_000u64;
+    fn report_actual(&mut self, source_idx: usize, bucket: Bucket, est_chars: u64, docs: u64, chars: u64) {
         let s = &mut self.sources[source_idx];
         s.docs_actual += docs;
         s.chars_actual += chars;
-        s.chars_est_dispatched = s.chars_est_dispatched.saturating_sub(est) + chars;
+        s.chars_est_dispatched = s.chars_est_dispatched.saturating_sub(est_chars) + chars;
         let disp = self.bucket_dispatched_chars.entry(bucket).or_insert(0);
-        *disp = disp.saturating_sub(est) + chars;
+        *disp = disp.saturating_sub(est_chars) + chars;
         *self.bucket_actual_chars.entry(bucket).or_insert(0) += chars;
     }
 }
@@ -366,38 +388,27 @@ fn download_bytes(client: &Client, token: Option<&str>, url: &str) -> Result<Byt
 }
 
 struct DocBatch {
+    source_idx: usize,
     bucket: Bucket,
     docs: Vec<String>,
-    chars: u64,
 }
 
 fn send_batch(
     tx: &Sender<DocBatch>,
+    source_idx: usize,
     bucket: Bucket,
     docs: &mut Vec<String>,
-    chars: &mut u64,
     stop: &AtomicBool,
 ) -> bool {
     if docs.is_empty() {
         return !stop.load(Ordering::Relaxed);
     }
     let batch = DocBatch {
+        source_idx,
         bucket,
         docs: std::mem::take(docs),
-        chars: *chars,
     };
-    *chars = 0;
-    while !stop.load(Ordering::Relaxed) {
-        match tx.send_timeout(batch, Duration::from_millis(200)) {
-            Ok(()) => return true,
-            Err(crossbeam_channel::SendTimeoutError::Timeout(b)) => {
-                // Retry sending the same batch until stop is signaled
-                return send_batch_owned(tx, b, stop);
-            }
-            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => return false,
-        }
-    }
-    false
+    send_batch_owned(tx, batch, stop)
 }
 
 fn send_batch_owned(tx: &Sender<DocBatch>, mut batch: DocBatch, stop: &AtomicBool) -> bool {
@@ -413,8 +424,13 @@ fn send_batch_owned(tx: &Sender<DocBatch>, mut batch: DocBatch, stop: &AtomicBoo
 
 fn parse_parquet_bytes(
     data: Bytes,
+    source_idx: usize,
     text_col: &str,
     bucket: Bucket,
+    source_cap: u64,
+    bucket_cap: u64,
+    source_written: &AtomicU64,
+    bucket_written: &AtomicU64,
     junk: &AhoCorasick,
     tx: &Sender<DocBatch>,
     stop: &AtomicBool,
@@ -432,29 +448,43 @@ fn parse_parquet_bytes(
     let mut total_docs = 0u64;
     let mut total_chars = 0u64;
     let mut buf = Vec::with_capacity(256);
-    let mut buf_chars = 0u64;
 
     for batch_res in reader {
-        if stop.load(Ordering::Relaxed) {
+        if stop.load(Ordering::Relaxed)
+            || source_written.load(Ordering::Relaxed) >= source_cap
+            || bucket_written.load(Ordering::Relaxed) >= bucket_cap
+        {
             break;
         }
         let batch = batch_res?;
         let col = batch.column(0);
+        let mut hit_cap = false;
         extract_strings_from_col(col.as_ref(), |s| {
+            if hit_cap {
+                return;
+            }
             let trimmed = s.trim();
             if keep_doc(trimmed, junk) {
                 let c = trimmed.len() as u64;
+                if source_written.load(Ordering::Relaxed) + total_chars >= source_cap
+                    || bucket_written.load(Ordering::Relaxed) + total_chars >= bucket_cap
+                {
+                    hit_cap = true;
+                    return;
+                }
                 buf.push(trimmed.to_string());
-                buf_chars += c;
                 total_docs += 1;
                 total_chars += c;
             }
         });
-        if buf.len() >= 256 && !send_batch(tx, bucket, &mut buf, &mut buf_chars, stop) {
+        if buf.len() >= 256 && !send_batch(tx, source_idx, bucket, &mut buf, stop) {
+            break;
+        }
+        if hit_cap {
             break;
         }
     }
-    let _ = send_batch(tx, bucket, &mut buf, &mut buf_chars, stop);
+    let _ = send_batch(tx, source_idx, bucket, &mut buf, stop);
     Ok((total_docs, total_chars))
 }
 
@@ -482,8 +512,13 @@ fn extract_strings_from_col<F: FnMut(&str)>(col: &dyn Array, mut f: F) {
 
 fn parse_jsonl_reader<R: Read>(
     reader: R,
+    source_idx: usize,
     text_col: &str,
     bucket: Bucket,
+    source_cap: u64,
+    bucket_cap: u64,
+    source_written: &AtomicU64,
+    bucket_written: &AtomicU64,
     junk: &AhoCorasick,
     tx: &Sender<DocBatch>,
     stop: &AtomicBool,
@@ -493,10 +528,12 @@ fn parse_jsonl_reader<R: Read>(
     let mut total_docs = 0u64;
     let mut total_chars = 0u64;
     let mut buf = Vec::with_capacity(256);
-    let mut buf_chars = 0u64;
 
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.load(Ordering::Relaxed)
+            || source_written.load(Ordering::Relaxed) >= source_cap
+            || bucket_written.load(Ordering::Relaxed) >= bucket_cap
+        {
             break;
         }
         line.clear();
@@ -518,18 +555,22 @@ fn parse_jsonl_reader<R: Read>(
                 let trimmed = t.trim();
                 if keep_doc(trimmed, junk) {
                     let c = trimmed.len() as u64;
+                    if source_written.load(Ordering::Relaxed) + total_chars >= source_cap
+                        || bucket_written.load(Ordering::Relaxed) + total_chars >= bucket_cap
+                    {
+                        break;
+                    }
                     buf.push(trimmed.to_string());
-                    buf_chars += c;
                     total_docs += 1;
                     total_chars += c;
-                    if buf.len() >= 256 && !send_batch(tx, bucket, &mut buf, &mut buf_chars, stop) {
+                    if buf.len() >= 256 && !send_batch(tx, source_idx, bucket, &mut buf, stop) {
                         break;
                     }
                 }
             }
         }
     }
-    let _ = send_batch(tx, bucket, &mut buf, &mut buf_chars, stop);
+    let _ = send_batch(tx, source_idx, bucket, &mut buf, stop);
     Ok((total_docs, total_chars))
 }
 
@@ -707,13 +748,12 @@ fn main() -> Result<()> {
             Ok(mut files) if !files.is_empty() => {
                 // Sort then deterministic shuffle so every run has diverse shard coverage
                 files.sort_by(|a, b| a.0.cmp(&b.0));
-                let mut paths: Vec<String> = files.into_iter().map(|(p, _)| p).collect();
-                paths.shuffle(&mut rng);
-                println!("  + {:24} {:5} files ({})", spec.name, paths.len(), spec.bucket.name());
+                files.shuffle(&mut rng);
+                println!("  + {:24} {:5} files ({})", spec.name, files.len(), spec.bucket.name());
                 states.push(SourceState {
                     chars_cap: (spec.max_tokens as f64 * CHARS_PER_TOKEN) as u64,
                     spec,
-                    files: VecDeque::from(paths),
+                    files: VecDeque::from(files),
                     chars_est_dispatched: 0,
                     chars_actual: 0,
                     docs_actual: 0,
@@ -724,9 +764,25 @@ fn main() -> Result<()> {
         }
     }
 
+    let num_sources = states.len();
+    let source_caps: Arc<Vec<u64>> = Arc::new(states.iter().map(|s| s.chars_cap).collect());
+    let source_written: Arc<Vec<AtomicU64>> = Arc::new((0..num_sources).map(|_| AtomicU64::new(0)).collect());
+    let bucket_caps: [u64; 4] = [
+        (max_chars as f64 * Bucket::General.target_share()) as u64,
+        (max_chars as f64 * Bucket::Code.target_share()) as u64,
+        (max_chars as f64 * Bucket::Cybersecurity.target_share()) as u64,
+        (max_chars as f64 * Bucket::Reasoning.target_share()) as u64,
+    ];
+    let bucket_written: Arc<[AtomicU64; 4]> = Arc::new([
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ]);
+
     let mut bucket_target_chars = HashMap::new();
     for b in Bucket::ALL {
-        bucket_target_chars.insert(b, (max_chars as f64 * b.target_share()) as u64);
+        bucket_target_chars.insert(b, bucket_caps[b.idx()]);
     }
 
     let scheduler = Arc::new(Mutex::new(Scheduler {
@@ -738,7 +794,6 @@ fn main() -> Result<()> {
 
     let junk = Arc::new(build_junk_filter());
     let stop = Arc::new(AtomicBool::new(false));
-    let total_chars_written = Arc::new(AtomicU64::new(0));
     let (doc_tx, doc_rx): (Sender<DocBatch>, Receiver<DocBatch>) = bounded(args.workers * 4);
 
     // Seed local cybersecurity JSONL docs immediately
@@ -747,9 +802,9 @@ fn main() -> Result<()> {
         let lchars: u64 = local_docs.iter().map(|s| s.len() as u64).sum();
         println!("  + local_cyber_files        {:5} docs (~{:.2}M tok)", local_docs.len(), lchars as f64 / 4e6);
         let _ = doc_tx.send(DocBatch {
+            source_idx: usize::MAX,
             bucket: Bucket::Cybersecurity,
             docs: local_docs,
-            chars: lchars,
         });
     }
 
@@ -777,43 +832,78 @@ fn main() -> Result<()> {
         let j = junk.clone();
         let tx = doc_tx.clone();
         let st = stop.clone();
+        let s_caps = source_caps.clone();
+        let s_wr = source_written.clone();
+        let b_wr = bucket_written.clone();
         worker_handles.push(thread::spawn(move || {
             while !st.load(Ordering::Relaxed) {
                 let task = {
                     let mut guard = sched.lock().unwrap();
-                    guard.next_task()
+                    guard.next_task(&b_wr, &s_wr)
                 };
-                let Some(task) = task else { break };
+                let Some(task) = task else {
+                    // Wait briefly if other buckets are still completing in-flight files
+                    if b_wr.iter().enumerate().all(|(i, a)| a.load(Ordering::Relaxed) >= bucket_caps[i]) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                    let has_any = {
+                        let guard = sched.lock().unwrap();
+                        guard.sources.iter().enumerate().any(|(i, s)| {
+                            !s.files.is_empty()
+                                && s_wr[i].load(Ordering::Relaxed) < s.chars_cap
+                                && b_wr[s.spec.bucket.idx()].load(Ordering::Relaxed) < bucket_caps[s.spec.bucket.idx()]
+                        })
+                    };
+                    if !has_any {
+                        break;
+                    }
+                    continue;
+                };
                 let url = format!(
                     "https://huggingface.co/datasets/{}/resolve/main/{}",
                     task.repo, task.path
                 );
+                let s_cap = s_caps[task.source_idx];
+                let b_cap = bucket_caps[task.bucket.idx()];
                 match download_bytes(&c, t.as_deref(), &url) {
                     Ok(bytes) => {
                         let res = if task.path.ends_with(".parquet") {
-                            parse_parquet_bytes(bytes, task.text_col, task.bucket, &j, &tx, &st)
+                            parse_parquet_bytes(
+                                bytes, task.source_idx, task.text_col, task.bucket,
+                                s_cap, b_cap, &s_wr[task.source_idx], &b_wr[task.bucket.idx()],
+                                &j, &tx, &st,
+                            )
                         } else if task.path.ends_with(".gz") {
                             let gz = MultiGzDecoder::new(Cursor::new(bytes));
-                            parse_jsonl_reader(gz, task.text_col, task.bucket, &j, &tx, &st)
+                            parse_jsonl_reader(
+                                gz, task.source_idx, task.text_col, task.bucket,
+                                s_cap, b_cap, &s_wr[task.source_idx], &b_wr[task.bucket.idx()],
+                                &j, &tx, &st,
+                            )
                         } else {
-                            parse_jsonl_reader(Cursor::new(bytes), task.text_col, task.bucket, &j, &tx, &st)
+                            parse_jsonl_reader(
+                                Cursor::new(bytes), task.source_idx, task.text_col, task.bucket,
+                                s_cap, b_cap, &s_wr[task.source_idx], &b_wr[task.bucket.idx()],
+                                &j, &tx, &st,
+                            )
                         };
                         match res {
                             Ok((docs, chars)) => {
                                 let mut guard = sched.lock().unwrap();
-                                guard.report_actual(task.source_idx, task.bucket, docs, chars);
+                                guard.report_actual(task.source_idx, task.bucket, task.est_chars, docs, chars);
                             }
                             Err(e) => {
                                 eprintln!("  [WARN] Parse failed {} ({}): {e}", task.source_name, task.path);
                                 let mut guard = sched.lock().unwrap();
-                                guard.report_actual(task.source_idx, task.bucket, 0, 0);
+                                guard.report_actual(task.source_idx, task.bucket, task.est_chars, 0, 0);
                             }
                         }
                     }
                     Err(e) => {
                         eprintln!("  [WARN] Download failed {} ({}): {e}", task.source_name, task.path);
                         let mut guard = sched.lock().unwrap();
-                        guard.report_actual(task.source_idx, task.bucket, 0, 0);
+                        guard.report_actual(task.source_idx, task.bucket, task.est_chars, 0, 0);
                     }
                 }
             }
@@ -862,17 +952,31 @@ fn main() -> Result<()> {
     };
 
     for batch in doc_rx {
+        let b_idx = batch.bucket.idx();
+        let b_cap = bucket_caps[b_idx];
+        let s_idx = batch.source_idx;
+        let s_cap = if s_idx < num_sources { source_caps[s_idx] } else { u64::MAX };
+
         for doc in batch.docs {
-            let dlen = doc.len();
-            if total_chars + (dlen as u64) > max_chars {
+            let dlen = doc.len() as u64;
+            if bucket_written[b_idx].load(Ordering::Relaxed) >= b_cap {
+                break;
+            }
+            if s_idx < num_sources && source_written[s_idx].load(Ordering::Relaxed) >= s_cap {
+                break;
+            }
+            if total_chars + dlen > max_chars {
                 stop.store(true, Ordering::Relaxed);
                 break;
             }
             cur_docs.push(doc);
-            cur_chars += dlen;
+            cur_chars += dlen as usize;
             total_docs += 1;
-            total_chars += dlen as u64;
-            total_chars_written.store(total_chars, Ordering::Relaxed);
+            total_chars += dlen;
+            bucket_written[b_idx].fetch_add(dlen, Ordering::Relaxed);
+            if s_idx < num_sources {
+                source_written[s_idx].fetch_add(dlen, Ordering::Relaxed);
+            }
 
             if cur_docs.len() >= args.shard_docs || cur_chars >= shard_max_chars {
                 flush_shard(&mut cur_docs, &mut cur_chars, &mut shard_idx, &mut val_parts, &write_tx)?;
@@ -888,13 +992,17 @@ fn main() -> Result<()> {
             let tok_s = est_tok / elapsed;
             let eta_min = ((args.max_tokens as f64 - est_tok).max(0.0) / tok_s.max(1.0)) / 60.0;
             println!(
-                "[PROGRESS] shards={:4} | docs={:10} | ~{:.2}B / {:.2}B tok ({:5.1}%) | {:.2}M tok/s | ETA ~{:.1}m",
+                "[PROGRESS] shards={:4} | docs={:10} | ~{:.2}B / {:.2}B tok ({:5.1}%) | {:.2}M tok/s | gen={:.1}B code={:.1}B cyber={:.1}B math={:.1}B | ETA ~{:.1}m",
                 shard_idx,
                 total_docs,
                 est_tok / 1e9,
                 args.max_tokens as f64 / 1e9,
                 pct,
                 tok_s / 1e6,
+                bucket_written[0].load(Ordering::Relaxed) as f64 / 4e9,
+                bucket_written[1].load(Ordering::Relaxed) as f64 / 4e9,
+                bucket_written[2].load(Ordering::Relaxed) as f64 / 4e9,
+                bucket_written[3].load(Ordering::Relaxed) as f64 / 4e9,
                 eta_min
             );
             last_log = Instant::now();
@@ -919,12 +1027,13 @@ fn main() -> Result<()> {
     let guard = scheduler.lock().unwrap();
     let mut stats_json = serde_json::Map::new();
     let mut completed = Vec::new();
-    for s in &guard.sources {
-        if s.docs_actual > 0 {
+    for (i, s) in guard.sources.iter().enumerate() {
+        let actual_c = source_written[i].load(Ordering::Relaxed);
+        if actual_c > 0 {
             completed.push(serde_json::Value::String(s.spec.name.to_string()));
             stats_json.insert(
                 s.spec.name.to_string(),
-                serde_json::json!({ "docs": s.docs_actual, "chars": s.chars_actual }),
+                serde_json::json!({ "docs": s.docs_actual, "chars": actual_c }),
             );
         }
     }
@@ -944,7 +1053,7 @@ fn main() -> Result<()> {
     println!("\n=== DONE in {:.2} min ===", mins);
     println!("  Shards: {} | Docs: {} | Est. Tokens: {:.2}B", shard_idx, total_docs, est_tok / 1e9);
     for b in Bucket::ALL {
-        let c = *guard.bucket_actual_chars.get(&b).unwrap_or(&0) as f64;
+        let c = bucket_written[b.idx()].load(Ordering::Relaxed) as f64;
         let bt = c / CHARS_PER_TOKEN;
         let share = if total_chars > 0 { 100.0 * c / (total_chars as f64) } else { 0.0 };
         println!("  - {:14}: ~{:6.2}B tok ({:4.1}%, target {:2.0}%)", b.name(), bt / 1e9, share, b.target_share() * 100.0);
