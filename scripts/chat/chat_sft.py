@@ -109,7 +109,7 @@ parser.add_argument("--xlam-function-calling-epochs", type=int, default=2, help=
 parser.add_argument("--include-english-sft", type=int, default=1, help="1 = include _en variants of bilingual cybersec datasets, 0 = ID only")
 parser.add_argument("--disable-cybersec-sft", action="store_true", help="disable all cybersecurity SFT datasets (for ablation)")
 parser.add_argument("--rules-epochs", type=int, default=4, help="epochs of rules.jsonl (behavioral/safety/format rules)")
-parser.add_argument("--tool-calling-epochs", type=int, default=24, help="epochs of tool_calling_conversations_en (calc/tool/subagent parts)")
+parser.add_argument("--tool-calling-epochs", type=int, default=4, help="epochs of tool_calling_conversations_en (tool/subagent parts)")
 parser.add_argument("--instruction-following-epochs", type=int, default=4, help="epochs of instruction_following_conversations_en.jsonl (format/count/conciseness polish)")
 parser.add_argument("--sft-jsonl-dir", help="Use train.jsonl and validation.jsonl from this directory")
 parser.add_argument("--instruction-polish-only", action="store_true", help="train only on local identity/rules/instruction-following polish data")
@@ -129,7 +129,7 @@ if args.targeted_domain_sft:
     args.cloud_security_epochs = 8
     args.mythos_epochs = 8
     args.mythos_tool_calling_epochs = 8
-    args.tool_calling_epochs = 12
+    args.tool_calling_epochs = 6
     args.tool_oriented_epochs = 8
     args.gemini_teacher_epochs = 6
     args.rules_epochs = 8
@@ -419,6 +419,7 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     assert dataset_size > 0
     row_capacity = args.max_seq_len + 1  # +1 for target at last position
     bos_token = tokenizer.get_bos_token_id()
+    assistant_end_token = tokenizer.encode_special("<|assistant_end|>")
 
     # Conversation buffer: list of (token_ids, loss_mask) tuples
     conv_buffer = []
@@ -426,18 +427,37 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     consumed = ddp_rank  # Track actual consumption separately from buffering
     epoch = 1
     it = 0  # iteration counter
+    skipped_truncated = 0
 
     def refill_buffer():
-        nonlocal cursor, epoch
+        nonlocal cursor, consumed, epoch, skipped_truncated
+        consecutive_skips = 0
         while len(conv_buffer) < buffer_size:
             conversation = dataset[cursor]
-            ids, mask = tokenizer.render_conversation(conversation, max_tokens=row_capacity)
-            conv_buffer.append((ids, mask))
+            # Render with +1 headroom to detect truncation without silently dropping <|assistant_end|>
+            ids, mask = tokenizer.render_conversation(conversation, max_tokens=row_capacity + 1)
             cursor += ddp_world_size
             if cursor >= dataset_size:
                 cursor = cursor % dataset_size
+                if skipped_truncated > 0:
+                    print0(f"[{split}] Skipped {skipped_truncated:,} over-length/unterminated conversations in epoch {epoch} (max_seq_len={args.max_seq_len})")
+                    skipped_truncated = 0
                 epoch += 1
                 # Note: last_step is now triggered based on consumption, not fetching
+
+            if len(ids) > row_capacity or not ids or ids[-1] != assistant_end_token or not any(mask):
+                skipped_truncated += 1
+                consumed += ddp_world_size
+                consecutive_skips += 1
+                if consecutive_skips >= dataset_size:
+                    raise RuntimeError(
+                        f"All {dataset_size} conversations in '{split}' split exceed max_seq_len={args.max_seq_len} "
+                        f"or have no supervised tokens ending with <|assistant_end|>."
+                    )
+                continue
+
+            consecutive_skips = 0
+            conv_buffer.append((ids, mask))
 
     while True:
         rows = []

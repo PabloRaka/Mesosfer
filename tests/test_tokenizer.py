@@ -180,6 +180,10 @@ def test_render_conversation_truncates_to_max_tokens(tok):
     ids, mask = tok.render_conversation(conv, max_tokens=128)
     assert len(ids) == 128
     assert len(mask) == 128
+    # Truncated conversation loses <|assistant_end|>, so row_capacity+1 check detects it
+    ids_probe, _ = tok.render_conversation(conv, max_tokens=129)
+    assert len(ids_probe) > 128
+    assert ids[-1] != tok.encode_special("<|assistant_end|>")
 
 
 def test_render_conversation_tool_call_parts(tok):

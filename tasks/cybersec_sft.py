@@ -394,7 +394,7 @@ def build_cybersec_sft_tasks(
     cloud_security_epochs: int = 2,
     multi_turn_soc_epochs: int = 0,
     tool_oriented_epochs: int = 1,
-    tool_calling_epochs: int = 24,
+    tool_calling_epochs: int = 4,
     mythos_epochs: int = 0,
     mythos_tool_calling_epochs: int = 0,
     mesosfer_validation_epochs: int = 0,

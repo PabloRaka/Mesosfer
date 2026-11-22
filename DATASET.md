@@ -217,7 +217,7 @@ Wired into the training mixture via `tasks/cybersec_sft.py` (default epochs show
 | CloudSecurity        | `cloud_security_sft(_en).jsonl`                | ID + EN  | 20             | Cloud IR (AWS, Azure, GCP).                          |
 | MultiTurnSOC         | `multi_turn_soc_sft.jsonl`                     | EN       | 30             | Multi-turn SOC dialogues (oversampled).              |
 | ToolOrientedCyber    | `tool_oriented_cyber_sft.jsonl`                | EN       | 20             | Tool-oriented cybersec (nmap, burp…).               |
-| ToolCalling          | `tool_calling_conversations_en.jsonl`          | EN       | 15             | Tool-calling (WHOIS, dig, hashes).                   |
+| ToolCalling          | `tool_calling_conversations_en.jsonl`          | EN       | 4              | Tool-calling (WHOIS, dig, hashes).                   |
 | MythosCombined       | `mythos_combined_sft(_en).jsonl`               | ID + EN  | 4              | Offensive/defensive narrative scenarios.             |
 | MythosToolCalling    | `mythos_tool_calling(_en).jsonl`               | ID + EN  | 4              | Mythos with native tool calling.                     |
 | mesosferValidation   | `mesosfer_validation_conversations(_en).jsonl` | ID + EN  | 2              | Domain alignment validation.                         |
