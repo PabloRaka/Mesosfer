@@ -202,18 +202,23 @@ def sample_next_token(logits, rng, temperature=1.0, top_k=None):
         return torch.multinomial(probs, num_samples=1, generator=rng)
 
 # -----------------------------------------------------------------------------
-def apply_repetition_penalty(logits, token_history, penalty=1.0):
+def apply_repetition_penalty(logits, token_history, penalty=1.0, exclude_tokens=None):
     """
     Apply repetition penalty to logits for tokens that have appeared in history.
     Positive logits: logit / penalty
     Negative logits: logit * penalty
+    Special tokens (e.g. <|assistant_end|>, <|tool_end|>, <|think_end|>, <|bos|>)
+    must be excluded so stopping/delimiter tokens are never suppressed.
     """
     if penalty == 1.0 or not token_history:
         return logits
+    excluded = set(exclude_tokens) if exclude_tokens else set()
     for row_idx, history in enumerate(token_history):
         if not history:
             continue
-        unique_tokens = list(set(history))
+        unique_tokens = [t for t in set(history) if t not in excluded]
+        if not unique_tokens:
+            continue
         row_logits = logits[row_idx, unique_tokens]
         penalized = torch.where(row_logits > 0, row_logits / penalty, row_logits * penalty)
         logits[row_idx, unique_tokens] = penalized
@@ -228,6 +233,9 @@ class RowState:
         self.forced_tokens = deque() # Queue of tokens to force inject
         self.in_tool_block = False # Whether we are inside a tool call block
         self.tool_tokens = [] # Tokens of the current tool call payload
+        self.tool_call_count = 0 # Number of tool calls executed in this turn
+        self.last_tool_payload = None # Last executed tool payload (guards against duplicate loops)
+        self.tool_limit_hit = False # Set True once duplicate/max tool call error has been injected
         self.completed = False # Whether this row has completed generation
 
 class Engine:
@@ -237,7 +245,7 @@ class Engine:
         self.tokenizer = tokenizer # needed for tool use
 
     @torch.inference_mode()
-    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, repetition_penalty=1.0, seed=42, stop_on_tool_call=False):
+    def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, repetition_penalty=1.0, seed=42, stop_on_tool_call=False, max_tool_calls=8):
         """Same as generate, but does single prefill and then clones the KV cache.
 
         stop_on_tool_call: when True, a row completes as soon as it emits <|tool_end|>
@@ -258,13 +266,29 @@ class Engine:
         rng.manual_seed(seed)
 
         # Get the special tokens we need to coordinate the tool use state machine
-        get_special = lambda s: self.tokenizer.encode_special(s)
-        tool_start = get_special("<|tool_start|>")
-        tool_end = get_special("<|tool_end|>")
-        output_start = get_special("<|output_start|>")
-        output_end = get_special("<|output_end|>")
-        assistant_end = get_special("<|assistant_end|>") # if sampled, ends row
+        def get_special_opt(s):
+            try:
+                return self.tokenizer.encode_special(s)
+            except (KeyError, ValueError):
+                return None
+
+        tool_start = get_special_opt("<|tool_start|>")
+        tool_end = get_special_opt("<|tool_end|>")
+        output_start = get_special_opt("<|output_start|>")
+        output_end = get_special_opt("<|output_end|>")
+        assistant_end = get_special_opt("<|assistant_end|>") # if sampled, ends row
         bos = self.tokenizer.get_bos_token_id() # if sampled, ends row
+
+        # Collect all special token IDs so repetition_penalty never suppresses EOS / closing tags
+        special_token_ids = {
+            t for t in (
+                bos, assistant_end, tool_start, tool_end, output_start, output_end,
+                get_special_opt("<|user_start|>"), get_special_opt("<|user_end|>"),
+                get_special_opt("<|assistant_start|>"),
+                get_special_opt("<|think_start|>"), get_special_opt("<|think_end|>"),
+            )
+            if t is not None
+        }
 
         # 1) Run a batch 1 prefill of the prompt tokens
         m = self.model.config
@@ -281,7 +305,7 @@ class Engine:
         logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
 
         # 2) Replicate the KV cache for each sample/row
-        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
+        kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else max(self.model.config.sequence_len, len(tokens) + 1)
         kv_cache_decode = KVCache(
             batch_size=num_samples,
             seq_len=kv_length_hint,
@@ -298,17 +322,21 @@ class Engine:
         # 4) Main generation loop
         num_generated = 0
         while True:
-            # Stop condition: we've reached max tokens
+            # Stop condition: we've reached max tokens or KV cache capacity
             if max_tokens is not None and num_generated >= max_tokens:
+                break
+            if kv_cache_decode.get_pos() >= kv_cache_decode.max_seq_len:
                 break
             # Stop condition: all rows are completed
             if all(state.completed for state in row_states):
                 break
 
-            # Apply repetition penalty if configured
+            # Apply repetition penalty if configured (never penalizing special tokens)
             if repetition_penalty > 1.0:
                 history = [state.current_tokens for state in row_states]
-                logits_to_sample = apply_repetition_penalty(logits.clone(), history, repetition_penalty)
+                logits_to_sample = apply_repetition_penalty(
+                    logits.clone(), history, repetition_penalty, exclude_tokens=special_token_ids
+                )
             else:
                 logits_to_sample = logits
 
@@ -320,6 +348,12 @@ class Engine:
             token_column = [] # contains the next token id along each row
             token_masks = [] # contains the mask (was it sampled (1) or forced (0)?) along each row
             for i, state in enumerate(row_states):
+                if state.completed:
+                    pad_tok = assistant_end if assistant_end is not None else bos
+                    token_masks.append(0)
+                    token_column.append(pad_tok)
+                    continue
+
                 # Select the next token in this row
                 is_forced = len(state.forced_tokens) > 0 # are there tokens waiting to be forced in deque?
                 token_masks.append(0 if is_forced else 1) # mask is 0 if forced, 1 if sampled
@@ -330,20 +364,33 @@ class Engine:
                 # On <|assistant_end|> or <|bos|>, mark the row as completed
                 if next_token == assistant_end or next_token == bos:
                     state.completed = True
+                    continue
                 # On <|tool_end|>, optionally hand control back to an external tool harness
                 # (instead of letting the model fabricate the tool output).
-                elif stop_on_tool_call and next_token == tool_end:
+                elif stop_on_tool_call and tool_end is not None and next_token == tool_end:
                     state.completed = True
+                    continue
 
                 # Handle tool logic (<|tool_start|> ... <|tool_end|>)
-                if next_token == tool_start:
+                if tool_start is not None and next_token == tool_start:
+                    if state.tool_limit_hit:
+                        state.completed = True
+                        continue
                     state.in_tool_block = True
                     state.tool_tokens = []
-                elif next_token == tool_end and state.in_tool_block:
+                elif tool_end is not None and next_token == tool_end and state.in_tool_block:
                     state.in_tool_block = False
-                    if state.tool_tokens:
-                        payload = self.tokenizer.decode(state.tool_tokens)
-                        result = execute_tool(payload)
+                    if state.tool_tokens and output_start is not None and output_end is not None:
+                        payload = self.tokenizer.decode(state.tool_tokens).strip()
+                        state.tool_call_count += 1
+                        if (max_tool_calls is not None and state.tool_call_count > max_tool_calls) or (
+                            payload and payload == state.last_tool_payload
+                        ):
+                            state.tool_limit_hit = True
+                            result = "Error: duplicate or maximum tool call limit reached. Provide final answer."
+                        else:
+                            state.last_tool_payload = payload
+                            result = execute_tool(payload)
                         if result is not None:
                             result_tokens = self.tokenizer.encode(str(result))
                             state.forced_tokens.append(output_start)

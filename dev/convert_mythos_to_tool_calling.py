@@ -118,13 +118,20 @@ def convert_conversation(messages: list[dict]) -> list[dict] | None:
                         # This assistant message contains a tool call
                         pre_text, command = _extract_tool_command(content)
                         if pre_text:
-                            parts.append({"type": "text", "text": pre_text + "\n"})
+                            cleaned_think = re.sub(r"^\s*<thinking>\s*|\s*</thinking>\s*$", "", pre_text, flags=re.S).strip()
+                            if cleaned_think:
+                                parts.append({"type": "think", "text": cleaned_think})
                         if command:
                             parts.append(_tool_part(command))
                     else:
                         # Final assistant text (no tool call)
                         if content.strip():
-                            parts.append({"type": "text", "text": "\n" + content})
+                            m_think = re.match(r"^\s*<thinking>\s*(.*?)\s*</thinking>\s*(.+)$", content.strip(), flags=re.S)
+                            if m_think and m_think.group(1).strip() and m_think.group(2).strip():
+                                parts.append({"type": "think", "text": m_think.group(1).strip()})
+                                parts.append({"type": "text", "text": m_think.group(2).strip()})
+                            else:
+                                parts.append({"type": "text", "text": content.strip()})
                     i += 1
 
                 elif current["role"] == "tool":

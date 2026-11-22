@@ -239,8 +239,14 @@ except FileNotFoundError as e:
 bos = tokenizer.get_bos_token_id()
 user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
 assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
-tool_start, tool_end = tokenizer.encode_special("<|tool_start|>"), tokenizer.encode_special("<|tool_end|>")
-output_start, output_end = tokenizer.encode_special("<|output_start|>"), tokenizer.encode_special("<|output_end|>")
+try:
+    tool_start, tool_end = tokenizer.encode_special("<|tool_start|>"), tokenizer.encode_special("<|tool_end|>")
+except KeyError:
+    tool_start, tool_end = None, None
+try:
+    output_start, output_end = tokenizer.encode_special("<|output_start|>"), tokenizer.encode_special("<|output_end|>")
+except KeyError:
+    output_start, output_end = None, None
 try:
     think_start, think_end = tokenizer.encode_special("<|think_start|>"), tokenizer.encode_special("<|think_end|>")
 except KeyError:
@@ -248,7 +254,26 @@ except KeyError:
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
-max_seq_len = meta.get("model_config", {}).get("sequence_len", 2048) if isinstance(meta, dict) else 2048
+max_seq_len = args.max_seq_len or (meta.get("model_config", {}).get("sequence_len", 8192) if isinstance(meta, dict) else 8192)
+
+
+def trim_conversation_context(tokens, max_budget):
+    """Ensure conversation_tokens never exceed max_budget by dropping oldest turns or cropping user tokens."""
+    if len(tokens) <= max_budget:
+        return tokens
+    # Drop oldest <|user_start|>...<|assistant_end|> turn pairs after <|bos|>
+    rest = list(tokens[1:])
+    while len(rest) + 1 > max_budget and assistant_end in rest:
+        end_idx = rest.index(assistant_end)
+        rest = rest[end_idx + 1:]
+    trimmed = [bos] + rest
+    if len(trimmed) <= max_budget:
+        return trimmed
+    # Single turn exceeds budget: preserve [bos, user_start, ...tail..., user_end]
+    tail_budget = max(4, max_budget) - 3
+    if trimmed[-1] == user_end:
+        return [bos, user_start] + trimmed[2:-1][-tail_budget:] + [user_end]
+    return [bos] + trimmed[-(max_budget - 1):]
 
 if not args.prompt:
     print_welcome(meta)
@@ -509,6 +534,7 @@ while True:
     conversation_tokens.append(user_start)
     conversation_tokens.extend(user_tokens)
     conversation_tokens.append(user_end)
+    conversation_tokens = trim_conversation_context(conversation_tokens, max(64, max_seq_len - args.max_tokens - 1))
     chat_history.append({"role": "user", "content": user_input})
 
     # Kick off the assistant
@@ -525,10 +551,10 @@ while True:
     print_assistant_header()
     renderer = CodeBlockState()
     t_start = time.time()
+    in_think_disp = False
+    in_tool_disp = False
+    in_output_disp = False
     try:
-        in_think_disp = False
-        in_tool_disp = False
-        in_output_disp = False
         for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
             token = token_column[0] # pop the batch dimension (num_samples=1)
             response_tokens.append(token)
@@ -542,19 +568,19 @@ while True:
                 in_think_disp = False
                 print(f"\n╰{'─' * max(10, TERM_WIDTH - 2)}╯{C.reset}\n", end="", flush=True)
                 continue
-            if token == tool_start:
+            if tool_start is not None and token == tool_start:
                 in_tool_disp = True
                 print(f"\n{C.purple}╭─ {C.teal}{C.bold}⚙ Tool Call{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 18)}╮{C.reset}\n{C.purple}│{C.reset} {C.cyan}", end="", flush=True)
                 continue
-            if token == tool_end:
+            if tool_end is not None and token == tool_end:
                 in_tool_disp = False
                 print(f"{C.reset}\n{C.purple}├─ {C.teal}{C.bold}Sandbox Result{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 21)}┤{C.reset}\n", end="", flush=True)
                 continue
-            if token == output_start:
+            if output_start is not None and token == output_start:
                 in_output_disp = True
                 print(f"{C.purple}│{C.reset} {C.green}", end="", flush=True)
                 continue
-            if token == output_end:
+            if output_end is not None and token == output_end:
                 in_output_disp = False
                 print(f"{C.reset}\n{C.purple}╰{'─' * max(10, TERM_WIDTH - 2)}╯{C.reset}\n", end="", flush=True)
                 continue
@@ -581,8 +607,14 @@ while True:
     assistant_response = "".join(response_text_list).strip()
     chat_history.append({"role": "assistant", "content": assistant_response})
 
-    # we have to ensure that the assistant end token is the last token
-    # so even if generation ends due to max tokens, we have to append it to the end
+    # Close any dangling think/tool/output span before appending <|assistant_end|>
+    # so an interrupted or max_tokens-truncated turn never corrupts subsequent turns.
+    if in_think_disp and think_end is not None:
+        response_tokens.append(think_end)
+    if in_tool_disp and tool_end is not None:
+        response_tokens.append(tool_end)
+    if in_output_disp and output_end is not None:
+        response_tokens.append(output_end)
     if not response_tokens or response_tokens[-1] != assistant_end:
         response_tokens.append(assistant_end)
     conversation_tokens.extend(response_tokens)

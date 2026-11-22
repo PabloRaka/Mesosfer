@@ -1,6 +1,8 @@
 import re
-import tomllib
 from pathlib import Path
+import pytest
+
+tomllib = pytest.importorskip("tomllib")
 
 
 def _pyproject():

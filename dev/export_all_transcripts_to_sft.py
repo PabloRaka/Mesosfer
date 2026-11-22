@@ -55,6 +55,14 @@ AGENT_PLANNING_PHRASES = [
     r"^Sekarang saya buat workspace.*",
 ]
 
+IDE_AND_SPECIAL_NOISE_RE = re.compile(
+    r"(file:///|C:/Users/|C:\\Users\\|\.gemini|antigravity|<\|[a-zA-Z0-9_]+\|>|"
+    r"\[diff_block_start\]|old_function_name\(\)|new_function_name\(\)|"
+    r"(^|\n)\s*(I will |Let me |Now let's |Waiting for |Checking task-|Target completed\.|Mari saya |Sekarang saya |Tunggu sebentar)|"
+    r"task-\d+|transcript\.jsonl|todo\.md|walkthrough\.md|implementation_plan\.md)",
+    re.IGNORECASE,
+)
+
 
 def clean_ansi(text: str) -> str:
     """Remove ANSI escape sequences and malformed brackets."""
@@ -133,7 +141,9 @@ def clean_user_text(raw_text: str) -> str | None:
     if len(words) <= 2 and not any(k in text_lower for k in ["df -h", "free -h", "ss -tulpn", "siem", "soc", "xss", "sqli", "ram"]):
         return None
 
-    if len(text) < 6 or len(text) > 3500:
+    if len(text) < 6 or len(text) > 2500:
+        return None
+    if IDE_AND_SPECIAL_NOISE_RE.search(text):
         return None
 
     return scrub_secrets(text)
@@ -141,7 +151,7 @@ def clean_user_text(raw_text: str) -> str | None:
 
 def clean_assistant_text(raw_text: str) -> str | None:
     """Clean and filter assistant responses."""
-    if not raw_text or len(raw_text.strip()) < 35:
+    if not raw_text or len(raw_text.strip()) < 40:
         return None
 
     text = clean_ansi(raw_text.strip())
@@ -158,19 +168,31 @@ def clean_assistant_text(raw_text: str) -> str | None:
     text = text.strip()
     text_lower = text.lower()
 
-    # Filter out side-projects
+    # Filter out side-projects, IDE paths, task polling loops, and leaked special tokens
     if any(k in text_lower for k in BLACKLIST_KEYWORDS):
         return None
+    if IDE_AND_SPECIAL_NOISE_RE.search(text):
+        return None
 
-    # Discard if response is too short or dangling
-    if len(text) < 35 or text.endswith("Mari mulai:"):
+    # Discard if response is too short, too long, or dangling
+    if len(text) < 40 or len(text) > 4000 or text.endswith(("Mari mulai:", ":")):
+        return None
+
+    # Reject repeated paragraphs or phrase loops
+    paras = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 30]
+    if len(paras) - len(set(paras)) >= 2:
+        return None
+    if re.search(r"([A-Za-z0-9\s]{20,})\1{2,}", text):
         return None
 
     return scrub_secrets(text)
 
 
 def extract_pairs_from_transcript(tpath: Path) -> list[tuple[str, str]]:
-    """Parse a single transcript.jsonl file into clean (user, assistant) pairs."""
+    """Parse a single transcript.jsonl file into clean (user, assistant) pairs.
+    Uses only the final substantive assistant response of each turn (never concatenating
+    intermediate pre-tool planning chunks into a monologue loop).
+    """
     try:
         with tpath.open("r", encoding="utf-8", errors="ignore") as f:
             lines = [json.loads(line) for line in f]
@@ -187,9 +209,10 @@ def extract_pairs_from_transcript(tpath: Path) -> list[tuple[str, str]]:
 
         if stype == "USER_INPUT":
             if current_user and current_assistant_chunks:
-                asst_full = "\n\n".join([c.strip() for c in current_assistant_chunks if c.strip()])
+                # Take only the final substantive response chunk, not intermediate tool-polling chatter
+                asst_final = current_assistant_chunks[-1].strip()
                 u_clean = clean_user_text(current_user)
-                a_clean = clean_assistant_text(asst_full)
+                a_clean = clean_assistant_text(asst_final)
                 if u_clean and a_clean:
                     pairs.append((u_clean, a_clean))
 
@@ -197,13 +220,13 @@ def extract_pairs_from_transcript(tpath: Path) -> list[tuple[str, str]]:
             current_assistant_chunks = []
 
         elif stype == "PLANNER_RESPONSE":
-            if content and not content.startswith("Created At:"):
+            if content and not content.startswith("Created At:") and not l.get("tool_calls"):
                 current_assistant_chunks.append(content)
 
     if current_user and current_assistant_chunks:
-        asst_full = "\n\n".join([c.strip() for c in current_assistant_chunks if c.strip()])
+        asst_final = current_assistant_chunks[-1].strip()
         u_clean = clean_user_text(current_user)
-        a_clean = clean_assistant_text(asst_full)
+        a_clean = clean_assistant_text(asst_final)
         if u_clean and a_clean:
             pairs.append((u_clean, a_clean))
 

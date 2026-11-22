@@ -1822,8 +1822,24 @@ def _is_dataset2_source(source_name, source_config=None):
     return source_config.get("dataset_group") == "dataset2"
 
 
+_DOC_REPEAT_RE = re.compile(r"(\S.{28,120}\S)(?:\s*\1){4,}")
+
+
+def _has_excessive_repetition(text: str) -> bool:
+    """Detect degenerate repetitive documents (log floods, copy-pasted loops) that cause LLM looping."""
+    if _DOC_REPEAT_RE.search(text):
+        return True
+    lines = [ln.strip() for ln in text.splitlines() if len(ln.strip()) >= 20]
+    if len(lines) >= 24 and len(set(lines)) * 4 < len(lines):
+        return True
+    return False
+
+
 def is_high_quality_security_text(text, source_name):
     lowered = text.lower()
+
+    if _has_excessive_repetition(text):
+        return False
 
     LOW_QUALITY_PATTERNS = [
         "node_modules",

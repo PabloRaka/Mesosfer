@@ -278,3 +278,69 @@ def test_hex_special_tokens_still_resolvable(hex_tok):
     ids = [hex_tok.encode_special(t) for t in SPECIAL_TOKENS]
     assert all(isinstance(i, int) for i in ids)
     assert len(set(ids)) == len(SPECIAL_TOKENS)
+
+
+def test_render_for_completion_overlength_preserves_bos_and_assistant_tail(tok):
+    conv = {"messages": [
+        {"role": "user", "content": "security operations triage " * 200},
+        {"role": "assistant", "content": "checking logs " * 200},
+        {"role": "user", "content": "what is the final root cause?"},
+        {"role": "assistant", "content": "placeholder"},
+    ]}
+    ids = tok.render_for_completion(conv, max_tokens=32)
+    assert len(ids) == 32
+    assert ids[0] == tok.get_bos_token_id()
+    assert ids[-2] == tok.encode_special("<|user_end|>")
+    assert ids[-1] == tok.encode_special("<|assistant_start|>")
+
+
+def test_is_valid_conversation_anti_looping_guards():
+    from tasks.customjson import _is_valid_conversation
+
+    # Valid conversation
+    assert _is_valid_conversation([
+        {"role": "user", "content": "Explain SSRF."},
+        {"role": "assistant", "content": "SSRF is Server-Side Request Forgery."},
+    ])
+
+    # 1. Odd length / trailing user message rejected
+    assert not _is_valid_conversation([
+        {"role": "user", "content": "Explain SSRF."},
+        {"role": "assistant", "content": "SSRF is Server-Side Request Forgery."},
+        {"role": "user", "content": "And CSRF?"},
+    ])
+
+    # 2. Raw special-token leak inside supervised text rejected
+    assert not _is_valid_conversation([
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Done.<|assistant_end|><|user_start|>Next question"},
+    ])
+
+    # 3. Consecutive duplicate tool calls rejected
+    dup_tool = '{"name": "terminal", "arguments": {"command": "ls -la ."}}'
+    assert not _is_valid_conversation([
+        {"role": "user", "content": "List files"},
+        {"role": "assistant", "content": [
+            {"type": "tool", "text": dup_tool},
+            {"type": "tool_output", "text": "total 0"},
+            {"type": "tool", "text": dup_tool},
+            {"type": "tool_output", "text": "total 0"},
+            {"type": "text", "text": "Listed."},
+        ]},
+    ])
+
+    # 4. Assistant turn ending on unsupervised tool_output rejected
+    assert not _is_valid_conversation([
+        {"role": "user", "content": "List files"},
+        {"role": "assistant", "content": [
+            {"type": "tool", "text": dup_tool},
+            {"type": "tool_output", "text": "total 0"},
+        ]},
+    ])
+
+    # 5. Multi-word phrase repetition loop rejected
+    assert not _is_valid_conversation([
+        {"role": "user", "content": "Check status"},
+        {"role": "assistant", "content": " ".join(["I will check the background task status now"] * 6)},
+    ])
+

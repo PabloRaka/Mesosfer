@@ -353,12 +353,69 @@ fn build_junk_filter() -> AhoCorasick {
 }
 
 #[inline]
+fn has_excessive_repetition(text: &str) -> bool {
+    // 1. Multi-line repetition check: if >= 24 substantial lines have < 25% unique lines
+    let mut substantive_lines = 0usize;
+    let mut prev_line = "";
+    let mut consecutive_dup_lines = 0usize;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.len() >= 20 {
+            substantive_lines += 1;
+            if t == prev_line {
+                consecutive_dup_lines += 1;
+                if consecutive_dup_lines >= 4 {
+                    return true;
+                }
+            } else {
+                prev_line = t;
+                consecutive_dup_lines = 0;
+            }
+        }
+    }
+    if substantive_lines >= 24 {
+        let mut uniq = std::collections::HashSet::with_capacity(substantive_lines);
+        for line in text.lines() {
+            let t = line.trim();
+            if t.len() >= 20 {
+                uniq.insert(t);
+            }
+        }
+        if uniq.len() * 4 < substantive_lines {
+            return true;
+        }
+    }
+    // 2. Consecutive 32-byte non-whitespace block repeat check (>= 5 consecutive repeats)
+    let bytes = text.as_bytes();
+    if bytes.len() >= 160 {
+        let step = 32;
+        let mut i = 0;
+        while i + step * 5 <= bytes.len() {
+            let chunk = &bytes[i..i + step];
+            if chunk.iter().any(|&b| !b.is_ascii_whitespace())
+                && &bytes[i + step..i + step * 2] == chunk
+                && &bytes[i + step * 2..i + step * 3] == chunk
+                && &bytes[i + step * 3..i + step * 4] == chunk
+                && &bytes[i + step * 4..i + step * 5] == chunk
+            {
+                return true;
+            }
+            i += step;
+        }
+    }
+    false
+}
+
+#[inline]
 fn keep_doc(text: &str, junk: &AhoCorasick) -> bool {
     let len = text.len();
     if len < MIN_DOC_CHARS || len > MAX_DOC_CHARS {
         return false;
     }
-    !junk.is_match(text)
+    if junk.is_match(text) {
+        return false;
+    }
+    !has_excessive_repetition(text)
 }
 
 fn download_bytes(client: &Client, token: Option<&str>, url: &str) -> Result<Bytes> {

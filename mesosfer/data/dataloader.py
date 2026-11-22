@@ -109,10 +109,17 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
 
     def refill_buffer():
         nonlocal pq_idx, rg_idx, epoch
-        doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
-        token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
-        for tokens in token_lists:
-            doc_buffer.append(tokens)
+        while True:
+            doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
+            token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+            added = 0
+            for tokens in token_lists:
+                # Skip empty documents (length 1 = only <|bos|>) so bare BOS tokens are never packed
+                if len(tokens) > 1:
+                    doc_buffer.append(tokens)
+                    added += 1
+            if added > 0:
+                break
 
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
     # This gives us contiguous views and a single HtoD transfer

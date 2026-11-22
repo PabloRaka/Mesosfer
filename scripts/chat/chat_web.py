@@ -68,6 +68,7 @@ parser.add_argument('-i', '--source', type=str, default="sft", help="Source of t
 parser.add_argument('-t', '--temperature', type=float, default=0.8, help='Default temperature for generation')
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Default top-k sampling parameter')
 parser.add_argument('-m', '--max-tokens', type=int, default=512, help='Default max tokens for generation')
+parser.add_argument('-r', '--repetition-penalty', type=float, default=1.1, help='Default repetition penalty (default: 1.1)')
 parser.add_argument('-g', '--model-tag', type=str, default=None, help='Model tag to load')
 parser.add_argument('-s', '--step', type=int, default=None, help='Step to load')
 parser.add_argument('-p', '--port', type=int, default=8000, help='Port to run the server on')
@@ -152,6 +153,7 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     top_k: Optional[int] = None
+    repetition_penalty: Optional[float] = None
 
 # Feedback storage path (relative to project root)
 RLHF_FEEDBACK_PATH = Path("data/rlhf/feedback.jsonl")
@@ -296,12 +298,14 @@ async def generate_stream(
     tokens,
     temperature=None,
     max_new_tokens=None,
-    top_k=None
+    top_k=None,
+    repetition_penalty=None,
 ) -> AsyncGenerator[str, None]:
     """Generate assistant response with streaming."""
     temperature = temperature if temperature is not None else args.temperature
     max_new_tokens = max_new_tokens if max_new_tokens is not None else args.max_tokens
     top_k = top_k if top_k is not None else args.top_k
+    repetition_penalty = repetition_penalty if repetition_penalty is not None else args.repetition_penalty
 
     assistant_end = worker.tokenizer.encode_special("<|assistant_end|>")
     bos = worker.tokenizer.get_bos_token_id()
@@ -317,6 +321,7 @@ async def generate_stream(
         max_tokens=max_new_tokens,
         temperature=temperature,
         top_k=top_k,
+        repetition_penalty=repetition_penalty,
         seed=random.randint(0, 2**31 - 1)
     ):
         token = token_column[0]
@@ -377,6 +382,23 @@ async def chat_completions(request: ChatRequest):
                 conversation_tokens.extend(worker.tokenizer.encode(message.content))
                 conversation_tokens.append(assistant_end)
 
+        # Ensure context + max_new_tokens fits within the model's sequence_len
+        max_new_tokens = request.max_tokens if request.max_tokens is not None else args.max_tokens
+        max_seq_len = getattr(worker.engine.model.config, "sequence_len", 8192)
+        max_prompt_budget = max(64, max_seq_len - max_new_tokens - 1)
+        if len(conversation_tokens) > max_prompt_budget:
+            rest = list(conversation_tokens[1:])
+            while len(rest) + 1 > max_prompt_budget and assistant_end in rest:
+                end_idx = rest.index(assistant_end)
+                rest = rest[end_idx + 1:]
+            conversation_tokens = [bos] + rest
+            if len(conversation_tokens) > max_prompt_budget:
+                tail_budget = max(4, max_prompt_budget) - 3
+                if conversation_tokens[-1] == user_end:
+                    conversation_tokens = [bos, user_start] + conversation_tokens[2:-1][-tail_budget:] + [user_end]
+                else:
+                    conversation_tokens = [bos] + conversation_tokens[-(max_prompt_budget - 1):]
+
         conversation_tokens.append(assistant_start)
 
         # Streaming response with worker release after completion
@@ -388,7 +410,8 @@ async def chat_completions(request: ChatRequest):
                     conversation_tokens,
                     temperature=request.temperature,
                     max_new_tokens=request.max_tokens,
-                    top_k=request.top_k
+                    top_k=request.top_k,
+                    repetition_penalty=request.repetition_penalty,
                 ):
                     # Accumulate response for logging
                     chunk_data = json.loads(chunk.replace("data: ", "").strip())

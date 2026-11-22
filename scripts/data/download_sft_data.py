@@ -351,7 +351,125 @@ SOURCES = {
         "max_rows": 50_000,
         "gated": False,
     },
+    # -------------------------------------------------------------------------
+    # Vyber07 Cybersecurity AI Knowledge Base — ShareGPT & Instruction/IO SFT pairs
+    # Covers red/blue team, web security (PortSwigger), forensics, cloud, AI/LLM security.
+    # Repo contains 507 mixed files (.tar.gz, .csv, __dup1 duplicates), so we pin
+    # data_files to the clean primary SFT JSONL files. Gated (requires HF_TOKEN).
+    # HF Link: https://huggingface.co/datasets/Vyber07/cyber-security
+    "vyber_cybersec": {
+        "hf_name": "Vyber07/cyber-security",
+        "split": "train",
+        "streaming": True,
+        "format": "auto",
+        "data_files": {
+            "train": [
+                "220426-CyberSec-Dataset_escaped.jsonl",
+                "vulnerability-intelligence/Cybersecurity-ShareGPT.jsonl",
+                "code_train.jsonl",
+            ]
+        },
+        "output_file": "vyber_cybersec_sft.jsonl",
+        "max_rows": 100_000,
+        "gated": True,
+    },
+    # -------------------------------------------------------------------------
+    # NVIDIA Nemotron-SFT-Agentic-v4 (tool_calling subset) — 549K multi-turn agentic
+    # tool-use trajectories with explicit reasoning_content, tool_calls, and tool outputs.
+    # HF Link: https://huggingface.co/datasets/nvidia/Nemotron-SFT-Agentic-v4
+    "nemotron_agentic_tool_calling": {
+        "hf_name": "nvidia/Nemotron-SFT-Agentic-v4",
+        "split": "tool_calling",
+        "streaming": True,
+        "format": "openai_tool_calls",
+        "output_file": "nemotron_agentic_tool_calling_sft.jsonl",
+        "max_rows": 50_000,
+        "gated": False,
+    },
+    # -------------------------------------------------------------------------
+    # NVIDIA Nemotron-SFT-Agentic-v4 (knowledge_agent subset) — 85K policy- and
+    # document-grounded multi-turn tool-use conversations with reasoning traces.
+    # HF Link: https://huggingface.co/datasets/nvidia/Nemotron-SFT-Agentic-v4
+    "nemotron_agentic_knowledge": {
+        "hf_name": "nvidia/Nemotron-SFT-Agentic-v4",
+        "split": "knowledge_agent",
+        "streaming": True,
+        "format": "openai_tool_calls",
+        "output_file": "nemotron_agentic_knowledge_sft.jsonl",
+        "max_rows": 25_000,
+        "gated": False,
+    },
 }
+
+from tasks.customjson import _is_valid_conversation
+
+# Maximum character budget per SFT conversation (~7,000 tokens at ~4 chars/token)
+# so rows fit comfortably inside max_seq_len=8192 without truncating <|assistant_end|>.
+MAX_SFT_CONV_CHARS = 28_000
+
+_THINK_TAG_RE = re.compile(
+    r"^\s*(?:<think>|<thinking>|<\|begin_of_thought\|>)\s*(.*?)\s*"
+    r"(?:</think>|</thinking>|<\|end_of_thought\|>)\s*(.+)$",
+    re.S,
+)
+
+
+def _normalize_assistant_thinking(content):
+    """Convert raw <think>...</think> or <thinking>...</thinking> prefixes in assistant
+    strings into native [{'type': 'think', ...}, {'type': 'text', ...}] parts so reasoning
+    uses <|think_start|>/<|think_end|> consistently across all SFT sources."""
+    if isinstance(content, str):
+        m = _THINK_TAG_RE.match(content)
+        if m:
+            think_txt, ans_txt = m.group(1).strip(), m.group(2).strip()
+            if think_txt and ans_txt:
+                return [{"type": "think", "text": think_txt}, {"type": "text", "text": ans_txt}]
+            return ans_txt or think_txt
+        return content.strip()
+    if isinstance(content, list):
+        new_parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                return content
+            if part.get("type") == "text" and isinstance(part.get("text"), str):
+                ptext = part["text"].strip()
+                m_full = re.match(r"^\s*(?:<think>|<thinking>)\s*(.*?)\s*(?:</think>|</thinking>)\s*$", ptext, re.S)
+                if m_full and m_full.group(1).strip():
+                    new_parts.append({"type": "think", "text": m_full.group(1).strip()})
+                    continue
+                m_split = _THINK_TAG_RE.match(ptext)
+                if m_split and m_split.group(1).strip() and m_split.group(2).strip():
+                    new_parts.append({"type": "think", "text": m_split.group(1).strip()})
+                    new_parts.append({"type": "text", "text": m_split.group(2).strip()})
+                    continue
+            new_parts.append(part)
+        return new_parts
+    return content
+
+
+def _conversation_char_len(messages: list) -> int:
+    total = 0
+    for msg in messages:
+        c = msg.get("content", "")
+        if isinstance(c, str):
+            total += len(c)
+        elif isinstance(c, list):
+            total += sum(len(p.get("text", "")) for p in c if isinstance(p, dict))
+    return total
+
+
+def _sanitize_and_validate_messages(messages: list | None) -> list | None:
+    if not messages or not isinstance(messages, list):
+        return None
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            msg["content"] = _normalize_assistant_thinking(msg.get("content"))
+    if not _is_valid_conversation(messages):
+        return None
+    if _conversation_char_len(messages) > MAX_SFT_CONV_CHARS:
+        return None
+    return messages
+
 
 # =============================================================================
 # Format converters
@@ -440,9 +558,19 @@ def convert_system_user_assistant(row) -> list | None:
 
 
 def convert_instruction_answer(row) -> list | None:
-    """Handle datasets with instruction/answer columns (e.g. Tiamz)."""
-    instruction = row.get("instruction") or row.get("question") or row.get("input") or row.get("problem") or ""
-    answer = row.get("answer") or row.get("output") or row.get("response") or row.get("solution") or ""
+    """Handle datasets with instruction/answer columns (e.g. Tiamz, Vyber07)."""
+    instruction = (
+        row.get("instruction") or row.get("Instruction")
+        or row.get("question") or row.get("Question")
+        or row.get("input") or row.get("Input")
+        or row.get("problem") or ""
+    )
+    answer = (
+        row.get("answer") or row.get("Answer")
+        or row.get("output") or row.get("Output")
+        or row.get("response") or row.get("Response")
+        or row.get("solution") or ""
+    )
     if not instruction or not answer:
         return None
     if not isinstance(instruction, str) or not isinstance(answer, str):
@@ -454,10 +582,10 @@ def convert_instruction_answer(row) -> list | None:
 
 
 def convert_alpaca(row) -> list | None:
-    """Handle standard Alpaca datasets with instruction, input, output columns."""
-    instruction = row.get("instruction") or ""
-    input_text = row.get("input") or ""
-    output = row.get("output") or ""
+    """Handle standard Alpaca datasets with instruction, input, output columns (case-insensitive)."""
+    instruction = row.get("instruction") or row.get("Instruction") or ""
+    input_text = row.get("input") or row.get("Input") or ""
+    output = row.get("output") or row.get("Output") or ""
     if not instruction or not output:
         return None
     if not isinstance(instruction, str) or not isinstance(output, str):
@@ -474,10 +602,11 @@ def convert_alpaca(row) -> list | None:
 def convert_auto(row) -> list | None:
     """Try each converter in turn; return the first successful conversion.
 
-    Useful for sources whose exact schema is uncertain (these were moved from
-    the pretraining pipeline, where they had been flattened to plain text)."""
-    for fn in (convert_messages_format, convert_system_user_assistant,
-               convert_instruction_answer, convert_alpaca):
+    Useful for sources whose exact schema is uncertain or mixed (e.g. ShareGPT +
+    Instruction/Input/Output in Vyber07/cyber-security)."""
+    for fn in (convert_sharegpt_tool_calls, convert_messages_format,
+               convert_alpaca, convert_system_user_assistant,
+               convert_instruction_answer):
         result = fn(row)
         if result:
             return result
@@ -706,18 +835,45 @@ def convert_sharegpt_tool_calls(row) -> list | None:
     return messages
 
 
+def _format_top_level_tools(tools) -> str:
+    """Render top-level OpenAI/Nemotron tool definitions as a concise preamble."""
+    if isinstance(tools, str):
+        try:
+            tools = json.loads(tools)
+        except json.JSONDecodeError:
+            return ""
+    if not isinstance(tools, list) or not tools:
+        return ""
+    lines = []
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+        name = fn.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        desc = str(fn.get("description") or "").strip()
+        lines.append(f"- {name.strip()}: {desc}" if desc else f"- {name.strip()}")
+    return ("Available tools:\n" + "\n".join(lines)) if lines else ""
+
+
 def convert_openai_tool_calls(row) -> list | None:
     """Rows with OpenAI-style ``messages`` carrying a ``tool_calls`` list.
 
-    Source schema (greghavens/kimi-k3-coding-and-debugging-traces): messages are
-    {"role": user|assistant|tool, "content": str, "reasoning_content": str,
+    Source schema (greghavens/kimi-k3-coding-and-debugging-traces,
+    nvidia/Nemotron-SFT-Agentic-v4): messages are
+    {"role": system|user|assistant|tool, "content": str, "reasoning_content": str,
      "tool_calls": [{"function": {"name", "arguments"}}], "tool_call_id": str}.
-    ``arguments`` arrives as a JSON *string*, which parse_tool_call would reject, so it is
-    decoded to a dict here. reasoning_content is kept as a leading text part.
+    ``arguments`` arrives as a JSON *string* or dict, so it is normalized to a dict here.
+    ``reasoning_content`` is placed into a native ``think`` part. Non-empty ``system``
+    messages and top-level ``tools`` definitions are folded into the first user turn.
     """
     msgs = row.get("messages")
     if not isinstance(msgs, list) or not msgs:
         return None
+
+    pending_context = []
+    tools_header = _format_top_level_tools(row.get("tools"))
 
     out, parts = [], []
     for m in msgs:
@@ -725,19 +881,37 @@ def convert_openai_tool_calls(row) -> list | None:
             return None
         role, content = m.get("role"), m.get("content")
         if role == "system":
+            if isinstance(content, str) and content.strip():
+                pending_context.append(content.strip())
             continue
         if role == "user":
             _flush(parts, out); parts = []
             if not isinstance(content, str) or not content.strip():
                 return None
-            out.append({"role": "user", "content": content.strip()})
+            user_text = content.strip()
+            if not out:
+                if tools_header and "Available tools:" not in user_text:
+                    pending_context.append(tools_header)
+                if pending_context:
+                    prefix = "\n\n".join(pending_context)
+                    user_text = f"{prefix}\n\n{user_text}"
+                    pending_context = []
+            out.append({"role": "user", "content": user_text})
         elif role == "assistant":
             reasoning = m.get("reasoning_content")
             if isinstance(reasoning, str) and reasoning.strip():
                 parts.append({"type": "think", "text": reasoning.strip()})
             if isinstance(content, str) and content.strip():
                 parts.append({"type": "text", "text": content.strip()})
-            for call in m.get("tool_calls") or []:
+            raw_calls = m.get("tool_calls") or []
+            if isinstance(raw_calls, str):
+                try:
+                    raw_calls = json.loads(raw_calls)
+                except json.JSONDecodeError:
+                    return None
+            if not isinstance(raw_calls, list):
+                return None
+            for call in raw_calls:
                 fn = (call or {}).get("function") or {}
                 args = fn.get("arguments")
                 if isinstance(args, str):
@@ -842,6 +1016,7 @@ def download_source(name: str, config: dict, hf_token: str | None = None, sample
     written = 0
     char_count = 0
     skipped = 0
+    seen_hashes = set()
     tmp_path = output_path.with_suffix(".tmp")
 
     try:
@@ -850,7 +1025,7 @@ def download_source(name: str, config: dict, hf_token: str | None = None, sample
                 if written >= max_rows:
                     break
                 try:
-                    messages = converter(row)
+                    messages = _sanitize_and_validate_messages(converter(row))
                 except Exception:
                     skipped += 1
                     continue
@@ -859,9 +1034,16 @@ def download_source(name: str, config: dict, hf_token: str | None = None, sample
                     skipped += 1
                     continue
 
-                f.write(json.dumps(messages, ensure_ascii=False) + "\n")
+                serialized = json.dumps(messages, ensure_ascii=False)
+                row_hash = hash(serialized)
+                if row_hash in seen_hashes:
+                    skipped += 1
+                    continue
+                seen_hashes.add(row_hash)
+
+                f.write(serialized + "\n")
                 written += 1
-                char_count += sum(len(msg.get("content", "")) for msg in messages)
+                char_count += _conversation_char_len(messages)
 
                 if sample_10k and int(char_count / 4.0) >= 10000:
                     break

@@ -224,7 +224,6 @@ Wired into the training mixture via `tasks/cybersec_sft.py` (default epochs show
 | GeminiTeacher        | `gemini_teacher_conversations.jsonl`           | EN       | 2              | Gemini-distilled teacher conversations.              |
 | Identity             | `identity_conversations(_en).jsonl`            | ID + EN  | 2              | Synthetic identity conversations.                    |
 | Rules                | `rules.jsonl`                                  | EN       | 4              | Safety/format/behavioral instructions.               |
-| SafetyArtifact       | `safety_artifact_conversations_en.jsonl`       | EN       | 4              | Refusals for attack automation vs allowed artifacts. |
 | InstructionFollowing | `instruction_following_conversations_en.jsonl` | EN       | 4              | Format constraints (json, word count).               |
 
 ### 3B. External datasets (downloaded by `download_sft_data.py` into `data/sft/`)
@@ -253,6 +252,9 @@ Wired into the training mixture via `tasks/cybersec_sft.py` (default epochs show
 | `kimi_k3_traces`             | `greghavens/kimi-k3-coding-and-debugging-traces`        | 4K       | 4              | Agentic coding/debugging trajectories with multi-step tool use and reasoning (cc-by-4.0). OpenAI-style `tool_calls`; `arguments` JSON string decoded to dict so `parse_tool_call` accepts it. |
 | `cot_collection`             | `kaist-ai/CoT-Collection` (`en`)                        | 50K      | 1              | Chain-of-thought rationales across many NLP tasks (cc-by-4.0). Repo ships only a loading script, so it is read via `revision=refs/convert/parquet`. |
 | `qyrou_reasoning`            | `Qyrou/reasoning-corpus-4K-5M-v1`                       | 50K      | 1              | Reasoning distilled from frontier models, apache-2.0. Has an explicit `thought_trace` column, so no thinking-tag parsing needed. |
+| `vyber_cybersec`             | `Vyber07/cyber-security`                                | 100K     | 1              | PhD-level cybersecurity SFT (ShareGPT & Instruction/IO JSONL subsets across offensive/defensive/web/cloud/AI security, **gated**). |
+| `nemotron_agentic_tool_calling` | `nvidia/Nemotron-SFT-Agentic-v4` (`tool_calling`)    | 50K      | 1              | Multi-turn agentic tool-use trajectories with `reasoning_content` → `<\|think_start\|>` and OpenAI `tool_calls` → `<\|tool_start\|>`. |
+| `nemotron_agentic_knowledge` | `nvidia/Nemotron-SFT-Agentic-v4` (`knowledge_agent`)    | 25K      | 1              | Policy- and document-grounded multi-turn tool-use conversations with reasoning traces. |
 
 > All external datasets above are wired into the default training mixture
 > (`tasks/cybersec_sft.py` → `build_cybersec_sft_tasks`, with CLI epoch flags in

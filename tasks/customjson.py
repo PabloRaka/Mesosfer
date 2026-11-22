@@ -4,6 +4,7 @@ Each line in the JSONL file should be a JSON array of messages.
 """
 
 import os
+import re
 import json
 from tasks.common import Task
 
@@ -11,27 +12,48 @@ from tasks.common import Task
 # Part types allowed inside a list-form assistant message (reasoning & tool-calling SFT).
 _VALID_PART_TYPES = ("text", "think", "tool", "tool_output")
 
+# Reject raw special token strings inside supervised text: encode_ordinary splits them into
+# ordinary subwords with mask=1, teaching the model to emit literal "<|assistant_end|>" text
+# instead of the EOS token ID and causing infinite generation / self-conversation loops.
+_SPECIAL_TOKEN_LEAK_RE = re.compile(
+    r"<\|(?:bos|user_start|user_end|assistant_start|assistant_end|"
+    r"think_start|think_end|tool_start|tool_end|output_start|output_end|"
+    r"python_start|python_end|calc_start|calc_end|"
+    r"endoftext|im_start|im_end|eot_id|begin_of_text|end_of_text|end_of_msg)\|>"
+)
+
+# Reject pathological multi-word phrase repetition loops in supervised text.
+_PHRASE_LOOP_RE = re.compile(r"([A-Za-z0-9][A-Za-z0-9\s,;:.!?_-]{18,}[A-Za-z0-9])\s*\1{3,}")
+
+
+def _has_supervised_text_defect(text: str) -> bool:
+    if _SPECIAL_TOKEN_LEAK_RE.search(text):
+        return True
+    if _PHRASE_LOOP_RE.search(text):
+        return True
+    return False
+
 
 def _is_valid_conversation(messages) -> bool:
     """
-    Validate a conversation against mesosfer's user/assistant alternation.
+    Validate a conversation against mesosfer's user/assistant alternation and anti-loop rules.
 
     - Must be a list of >= 2 message dicts with 'role' and 'content'.
-    - Roles must alternate starting with 'user'.
+    - Roles must strictly alternate starting with 'user' AND ending with 'assistant' (even count).
     - An optional leading system message is allowed (the tokenizer merges it
       into the first user message via render_conversation).
-    - User content must be a string.
-    - Assistant content may be a string OR a list of part-dicts (tool calls), each
-      with 'type' (in _VALID_PART_TYPES) and 'text'. This mirrors RobustCustomJSON
-      so tool-calling data in local SFT files does not crash the run.
+    - User content must be a non-empty string without raw protocol special-token markers.
+    - Assistant content may be a non-empty string OR a non-empty list of part-dicts, each
+      with 'type' (in _VALID_PART_TYPES) and 'text', ending on a supervised part ('text' or 'tool'),
+      with no consecutive duplicate tool calls or leaked special tokens / phrase loops.
     """
     if not isinstance(messages, list) or len(messages) < 2:
         return False
     # Strip optional leading system message (tokenizer handles the merge)
     if isinstance(messages[0], dict) and messages[0].get("role") == "system":
         messages = messages[1:]
-        if len(messages) < 2:
-            return False
+    if len(messages) < 2 or len(messages) % 2 != 0:
+        return False
     for i, message in enumerate(messages):
         if not isinstance(message, dict) or "role" not in message or "content" not in message:
             return False
@@ -40,16 +62,42 @@ def _is_valid_conversation(messages) -> bool:
             return False
         content = message["content"]
         if expected_role == "user":
-            if not isinstance(content, str):
+            if not isinstance(content, str) or not content.strip():
+                return False
+            if _SPECIAL_TOKEN_LEAK_RE.search(content):
                 return False
         else:  # assistant
             if isinstance(content, list):
+                if not content:
+                    return False
+                has_supervised = False
+                last_tool_payload = None
                 for part in content:
                     if not isinstance(part, dict) or "type" not in part or "text" not in part:
                         return False
-                    if part["type"] not in _VALID_PART_TYPES:
+                    ptype = part["type"]
+                    ptext = part["text"]
+                    if ptype not in _VALID_PART_TYPES or not isinstance(ptext, str):
                         return False
-            elif not isinstance(content, str):
+                    if ptype in ("text", "think", "tool"):
+                        if not ptext.strip() or _has_supervised_text_defect(ptext):
+                            return False
+                        has_supervised = True
+                    if ptype == "tool":
+                        norm_payload = ptext.strip()
+                        if norm_payload == last_tool_payload:
+                            return False  # reject consecutive identical tool call loops
+                        last_tool_payload = norm_payload
+                    elif ptype == "text":
+                        last_tool_payload = None
+                # Must have supervised content and end on a supervised response ('text' or 'tool'),
+                # never on an unanswered 'tool_output' or dangling 'think'.
+                if not has_supervised or content[-1]["type"] not in ("text", "tool"):
+                    return False
+            elif isinstance(content, str):
+                if not content.strip() or _has_supervised_text_defect(content):
+                    return False
+            else:
                 return False
     return True
 

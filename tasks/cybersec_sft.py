@@ -41,6 +41,7 @@ import os
 from pathlib import Path
 
 from tasks.common import Task
+from tasks.customjson import _is_valid_conversation
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -55,54 +56,6 @@ _FILE_CACHE: dict = {}
 def _sft_path(filename: str, sft_dir: str | None = None) -> str:
     base = Path(sft_dir) if sft_dir else DEFAULT_SFT_DIR
     return str(base / filename)
-
-
-def _is_valid_conversation(messages) -> bool:
-    """
-    Check if a conversation matches mesosfer's expected user/assistant alternation.
-
-    Returns False if any message has a role other than user/assistant, or if the
-    pattern doesn't alternate starting with user.
-
-    An optional leading system message is allowed (the tokenizer merges it into
-    the first user message via render_conversation).
-
-    Assistant content may be a string (simple text) or a list of parts (tool
-    calls using ``<|tool_start|>`` / ``<|output_start|>`` tokens).  User content
-    must always be a string.
-    """
-    if not isinstance(messages, list) or len(messages) < 2:
-        return False
-    # Strip optional leading system message (tokenizer handles the merge)
-    if isinstance(messages[0], dict) and messages[0].get("role") == "system":
-        messages = messages[1:]
-        if len(messages) < 2:
-            return False
-    for i, message in enumerate(messages):
-        if not isinstance(message, dict):
-            return False
-        if "role" not in message or "content" not in message:
-            return False
-        expected_role = "user" if i % 2 == 0 else "assistant"
-        if message["role"] != expected_role:
-            return False
-        content = message["content"]
-        if expected_role == "user":
-            if not isinstance(content, str):
-                return False
-        else:  # assistant
-            if not isinstance(content, (str, list)):
-                return False
-            if isinstance(content, list):
-                # Validate each part has the required fields
-                for part in content:
-                    if not isinstance(part, dict):
-                        return False
-                    if "type" not in part or "text" not in part:
-                        return False
-                    if part["type"] not in ("text", "think", "tool", "tool_output"):
-                        return False
-    return True
 
 
 class RobustCustomJSON(Task):
@@ -385,6 +338,24 @@ class XLAMFunctionCalling(RobustCustomJSON):
         super().__init__(filepath=_sft_path("xlam_function_calling_sft.jsonl", sft_dir), **kwargs)
 
 
+class VyberCybersecSFT(RobustCustomJSON):
+    """Vyber07 Cybersecurity AI Knowledge Base SFT conversations & instruction pairs (~100K rows, gated)."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("vyber_cybersec_sft.jsonl", sft_dir), **kwargs)
+
+
+class NemotronAgenticToolCallingSFT(RobustCustomJSON):
+    """NVIDIA Nemotron-SFT-Agentic-v4 multi-turn tool-calling trajectories with reasoning traces (~50K rows)."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("nemotron_agentic_tool_calling_sft.jsonl", sft_dir), **kwargs)
+
+
+class NemotronAgenticKnowledgeSFT(RobustCustomJSON):
+    """NVIDIA Nemotron-SFT-Agentic-v4 policy/document-grounded knowledge agent trajectories (~25K rows)."""
+    def __init__(self, sft_dir=None, **kwargs):
+        super().__init__(filepath=_sft_path("nemotron_agentic_knowledge_sft.jsonl", sft_dir), **kwargs)
+
+
 
 # -----------------------------------------------------------------------------
 # Mixture builders
@@ -423,6 +394,9 @@ def build_cybersec_sft_tasks(
     numinamath_cot_epochs: int = 1,
     aquilax_security_reasoning_epochs: int = 2,
     xlam_function_calling_epochs: int = 1,
+    vyber_cybersec_epochs: int = 1,
+    nemotron_agentic_tool_calling_epochs: int = 1,
+    nemotron_agentic_knowledge_epochs: int = 1,
     include_english: bool = True,
     sft_dir: str | None = None,
 ) -> list:
@@ -530,6 +504,12 @@ def build_cybersec_sft_tasks(
         tasks.append(AquilaXSecurityReasoning(sft_dir=sft_dir))
     for _ in range(xlam_function_calling_epochs):
         tasks.append(XLAMFunctionCalling(sft_dir=sft_dir))
+    for _ in range(vyber_cybersec_epochs):
+        tasks.append(VyberCybersecSFT(sft_dir=sft_dir))
+    for _ in range(nemotron_agentic_tool_calling_epochs):
+        tasks.append(NemotronAgenticToolCallingSFT(sft_dir=sft_dir))
+    for _ in range(nemotron_agentic_knowledge_epochs):
+        tasks.append(NemotronAgenticKnowledgeSFT(sft_dir=sft_dir))
 
 
     # Filter out empty tasks (e.g. if all rows were skipped)

@@ -42,7 +42,6 @@ with `--alpaca-indonesian-epochs=0`.
 
 - `identity_conversations.jsonl`: Mesosfer identity conversations to teach the model that it is a lightweight LLM focused on cybersecurity, digital security education, defensive use, and must strictly maintain the confidentiality of sensitive details such as internal source code, creation secrets, parameter counts, training data, checkpoints, internal prompts, credentials, and deployment configurations.
 - `instruction_following_conversations_en.jsonl`: compact English instruction-following polish set for exact sentence counts, concise answers, "do not write code" constraints, JSON-only responses, bullets, safe refusals, and defensive cybersecurity checklists.
-- `safety_artifact_conversations_en.jsonl`: focused artifact-vs-attack boundary set. It teaches that synthetic logs, fake IOCs, alerts, JSON/YAML summaries, and safe local parsers are allowed, while malware, brute-force automation, credential theft, persistence, and destructive scripts must be refused.
 - `cyber_defensive_conversations.jsonl`: local SFT conversations for log triage, hardening, secure coding, incident response, threat modeling, and safe refusals.
 - `tool_calling_conversations_en.jsonl`: teaches the model to invoke tools via `<|tool_start|>` / `<|tool_end|>` special tokens. Covers WHOIS lookups, DNS resolution, hash checking, log parsing, base64/hex decoding, and safe refusals for offensive tool misuse.
 - `mythos_tool_calling.jsonl` and `mythos_tool_calling_en.jsonl`: mythos tool-calling data generated from `mythos_combined_sft` by converting tool-use roles into generic named tool calls (`<|tool_start|>` … `<|tool_end|>` with JSON `{"name": "shell", "arguments": {"command": ...}}`) and tool output roles into `<|output_start|>` blocks. Teaches real-world command execution in cybersecurity contexts (nmap, tshark, Suricata, etc.).
@@ -68,12 +67,6 @@ Regenerate the instruction-following polish set:
 
 ```bash
 python3 dev/generate_instruction_following_sft.py
-```
-
-Regenerate the safety-artifact boundary set:
-
-```bash
-python3 dev/generate_safety_artifact_sft.py
 ```
 
 Regenerate the tool-calling dataset:

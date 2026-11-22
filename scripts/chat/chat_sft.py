@@ -106,6 +106,9 @@ parser.add_argument("--code-feedback-epochs", type=int, default=1, help="epochs 
 parser.add_argument("--numinamath-cot-epochs", type=int, default=1, help="epochs of numinamath_cot_sft (~50K rows, 0=skip)")
 parser.add_argument("--aquilax-security-reasoning-epochs", type=int, default=2, help="epochs of aquilax_security_reasoning_sft cybersec CoT (~18K rows, gated, 0=skip)")
 parser.add_argument("--xlam-function-calling-epochs", type=int, default=2, help="epochs of xlam_function_calling_sft generic tool-calling (~20K rows, gated, 0=skip)")
+parser.add_argument("--vyber-cybersec-epochs", type=int, default=1, help="epochs of vyber_cybersec_sft PhD-level cybersecurity SFT (~100K rows, gated, 0=skip)")
+parser.add_argument("--nemotron-agentic-tool-calling-epochs", type=int, default=1, help="epochs of nemotron_agentic_tool_calling_sft multi-turn tool use (~50K rows, 0=skip)")
+parser.add_argument("--nemotron-agentic-knowledge-epochs", type=int, default=1, help="epochs of nemotron_agentic_knowledge_sft policy/document tool use (~25K rows, 0=skip)")
 parser.add_argument("--include-english-sft", type=int, default=1, help="1 = include _en variants of bilingual cybersec datasets, 0 = ID only")
 parser.add_argument("--disable-cybersec-sft", action="store_true", help="disable all cybersecurity SFT datasets (for ablation)")
 parser.add_argument("--rules-epochs", type=int, default=4, help="epochs of rules.jsonl (behavioral/safety/format rules)")
@@ -113,8 +116,6 @@ parser.add_argument("--tool-calling-epochs", type=int, default=4, help="epochs o
 parser.add_argument("--instruction-following-epochs", type=int, default=4, help="epochs of instruction_following_conversations_en.jsonl (format/count/conciseness polish)")
 parser.add_argument("--sft-jsonl-dir", help="Use train.jsonl and validation.jsonl from this directory")
 parser.add_argument("--instruction-polish-only", action="store_true", help="train only on local identity/rules/instruction-following polish data")
-parser.add_argument("--safety-artifact-epochs", type=int, default=4, help="epochs of safety_artifact_conversations_en.jsonl (artifact-vs-attack boundary)")
-parser.add_argument("--safety-artifact-only", action="store_true", help="train only on local identity/rules/safety-artifact boundary data")
 parser.add_argument("--local-sft-only", action="store_true", help="train only on local SFT datasets (skip downloading SmolTalk, MMLU, GSM8K, and Spelling tasks)")
 parser.add_argument("--targeted-domain-sft", action="store_true", help="train specifically on cybersecurity, tool-use, code feedback, and CoT reasoning without generic chatter")
 parser.add_argument("--save-every", type=int, default=200, help="save intermediate checkpoint every N steps (-1 = only at end)")
@@ -134,7 +135,6 @@ if args.targeted_domain_sft:
     args.gemini_teacher_epochs = 6
     args.rules_epochs = 8
     args.instruction_following_epochs = 8
-    args.safety_artifact_epochs = 6
 
 user_config = vars(args).copy()
 # -----------------------------------------------------------------------------
@@ -260,14 +260,12 @@ identity_conversations_filepath = os.path.join(sft_dir, "identity_conversations.
 identity_conversations_en_filepath = os.path.join(sft_dir, "identity_conversations_en.jsonl")
 rules_filepath = os.path.join(sft_dir, "rules.jsonl")
 instruction_following_filepath = os.path.join(sft_dir, "instruction_following_conversations_en.jsonl")
-safety_artifact_filepath = os.path.join(sft_dir, "safety_artifact_conversations_en.jsonl")
 def build_default_train_tasks():
-    if args.instruction_polish_only or args.safety_artifact_only:
+    if args.instruction_polish_only:
         train_tasks = [
             CustomJSON(filepath=identity_conversations_filepath),
         ]
-        mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
-        print0(f"{mode_name} mode: skipping broad SmolTalk/MMLU/GSM8K/spelling training tasks")
+        print0("Instruction polish mode: skipping broad SmolTalk/MMLU/GSM8K/spelling training tasks")
     elif args.local_sft_only:
         train_tasks = [
             CustomJSON(filepath=identity_conversations_filepath),
@@ -302,26 +300,17 @@ def build_default_train_tasks():
     elif args.rules_epochs > 0:
         print0(f"WARNING: rules.jsonl not found at {rules_filepath}, skipping")
 
-    # Add safety artifact boundary data (synthetic artifacts allowed, attack automation refused)
-    if args.safety_artifact_epochs > 0 and os.path.exists(safety_artifact_filepath):
-        safety_artifact_tasks = [CustomJSON(filepath=safety_artifact_filepath) for _ in range(args.safety_artifact_epochs)]
-        train_tasks.extend(safety_artifact_tasks)
-        print0(f"Added safety_artifact_conversations_en.jsonl: {args.safety_artifact_epochs} epoch(s) from {safety_artifact_filepath}")
-    elif args.safety_artifact_epochs > 0:
-        print0(f"WARNING: safety_artifact_conversations_en.jsonl not found at {safety_artifact_filepath}, skipping")
-
     # Add instruction-following polish data (exact counts, no-code constraints, JSON-only, concise answers)
-    if not args.safety_artifact_only and args.instruction_following_epochs > 0 and os.path.exists(instruction_following_filepath):
+    if args.instruction_following_epochs > 0 and os.path.exists(instruction_following_filepath):
         instruction_tasks = [CustomJSON(filepath=instruction_following_filepath) for _ in range(args.instruction_following_epochs)]
         train_tasks.extend(instruction_tasks)
         print0(f"Added instruction_following_conversations_en.jsonl: {args.instruction_following_epochs} epoch(s) from {instruction_following_filepath}")
-    elif not args.safety_artifact_only and args.instruction_following_epochs > 0:
+    elif args.instruction_following_epochs > 0:
         print0(f"WARNING: instruction_following_conversations_en.jsonl not found at {instruction_following_filepath}, skipping")
 
     # Add cybersecurity SFT mixture (preserves cybersec capability from pretraining)
-    if args.instruction_polish_only or args.safety_artifact_only:
-        mode_name = "Safety artifact" if args.safety_artifact_only else "Instruction polish"
-        print0(f"{mode_name} mode: skipping broad cybersec SFT mixture")
+    if args.instruction_polish_only:
+        print0("Instruction polish mode: skipping broad cybersec SFT mixture")
     elif not args.disable_cybersec_sft:
         cybersec_tasks = build_cybersec_sft_tasks(
             cyber_defensive_epochs=args.cyber_defensive_epochs,
@@ -346,12 +335,20 @@ def build_default_train_tasks():
             alpaca_gpt4_indonesian_epochs=args.alpaca_gpt4_indonesian_epochs,
             magpie_reasoning_epochs=args.magpie_reasoning_epochs,
             open_thoughts_epochs=args.open_thoughts_epochs,
+            hermes_func_calling_epochs=args.hermes_func_calling_epochs,
+            hermes_glaive_func_calling_epochs=args.hermes_glaive_func_calling_epochs,
+            kimi_k3_traces_epochs=args.kimi_k3_traces_epochs,
+            cot_collection_epochs=args.cot_collection_epochs,
+            qyrou_reasoning_epochs=args.qyrou_reasoning_epochs,
             nist_cybersec_epochs=args.nist_cybersec_epochs,
             fenrir_v2_epochs=args.fenrir_v2_epochs,
             code_feedback_epochs=args.code_feedback_epochs,
             numinamath_cot_epochs=args.numinamath_cot_epochs,
             aquilax_security_reasoning_epochs=args.aquilax_security_reasoning_epochs,
             xlam_function_calling_epochs=args.xlam_function_calling_epochs,
+            vyber_cybersec_epochs=args.vyber_cybersec_epochs,
+            nemotron_agentic_tool_calling_epochs=args.nemotron_agentic_tool_calling_epochs,
+            nemotron_agentic_knowledge_epochs=args.nemotron_agentic_knowledge_epochs,
             include_english=bool(args.include_english_sft),
             sft_dir=sft_dir,
         )
@@ -445,7 +442,15 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 epoch += 1
                 # Note: last_step is now triggered based on consumption, not fetching
 
-            if len(ids) > row_capacity or not ids or ids[-1] != assistant_end_token or not any(mask):
+            if (
+                len(ids) > row_capacity
+                or len(ids) < 6
+                or ids[0] != bos_token
+                or ids[-1] != assistant_end_token
+                or mask[-1] != 1
+                or mask[-2] != 1
+                or sum(mask) < 2
+            ):
                 skipped_truncated += 1
                 consumed += ddp_world_size
                 consecutive_skips += 1
@@ -606,7 +611,7 @@ while True:
     if last_step or (args.eval_every > 0 and step % args.eval_every == 0):
         model.eval()
         val_loader = build_val_loader()
-        eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+        eval_steps = max(1, args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size))
         val_bpb, val_loss = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
         if master_process:
             tqdm.write(f"Step {step:05d} | Validation bpb: {val_bpb:.4f} | Val loss: {val_loss:.4f}")

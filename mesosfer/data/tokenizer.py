@@ -357,21 +357,39 @@ class RustBPETokenizer:
                         elif part["type"] == "think":
                             # internal reasoning / CoT => tokens inside <|think_start|> and <|think_end|>
                             # supervised: the assistant learns to reason before answering or calling tools
-                            add_tokens(self.encode_special("<|think_start|>"), 1)
+                            try:
+                                think_s = self.encode_special("<|think_start|>")
+                                think_e = self.encode_special("<|think_end|>")
+                            except KeyError:
+                                think_s = self.encode("<think>\n")
+                                think_e = self.encode("\n</think>\n")
+                            add_tokens(think_s, 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(self.encode_special("<|think_end|>"), 1)
+                            add_tokens(think_e, 1)
                         elif part["type"] == "tool":
                             # tool call => tokens inside <|tool_start|> and <|tool_end|>
                             # supervised: the assistant must learn to emit the tool call
-                            add_tokens(self.encode_special("<|tool_start|>"), 1)
+                            try:
+                                tool_s = self.encode_special("<|tool_start|>")
+                                tool_e = self.encode_special("<|tool_end|>")
+                            except KeyError:
+                                tool_s = self.encode("<tool_call>")
+                                tool_e = self.encode("</tool_call>")
+                            add_tokens(tool_s, 1)
                             add_tokens(value_ids, 1)
-                            add_tokens(self.encode_special("<|tool_end|>"), 1)
+                            add_tokens(tool_e, 1)
                         elif part["type"] == "tool_output":
                             # tool result => tokens inside <|output_start|> and <|output_end|>
                             # not supervised: the result comes from the environment at test time
-                            add_tokens(self.encode_special("<|output_start|>"), 0)
+                            try:
+                                out_s = self.encode_special("<|output_start|>")
+                                out_e = self.encode_special("<|output_end|>")
+                            except KeyError:
+                                out_s = self.encode("<tool_response>")
+                                out_e = self.encode("</tool_response>")
+                            add_tokens(out_s, 0)
                             add_tokens(value_ids, 0)
-                            add_tokens(self.encode_special("<|output_end|>"), 0)
+                            add_tokens(out_e, 0)
                         else:
                             raise ValueError(f"Unknown part type: {part['type']}")
                 else:
@@ -379,8 +397,9 @@ class RustBPETokenizer:
                 add_tokens(assistant_end, 1)
 
         # truncate to max_tokens tokens MAX (helps prevent OOMs)
-        ids = ids[:max_tokens]
-        mask = mask[:max_tokens]
+        if max_tokens is not None:
+            ids = ids[:max_tokens]
+            mask = mask[:max_tokens]
         return ids, mask
 
     def visualize_tokenization(self, ids, mask, with_token_id=False):
@@ -398,11 +417,13 @@ class RustBPETokenizer:
                 tokens.append(f"{GRAY}({token_id}){RESET}")
         return '|'.join(tokens)
 
-    def render_for_completion(self, conversation):
+    def render_for_completion(self, conversation, max_tokens=8192):
         """
-        Used during Reinforcement Learning. In that setting, we want to
+        Used during Reinforcement Learning and evaluation. In that setting, we want to
         render the conversation priming the Assistant for a completion.
         Unlike the Chat SFT case, we don't need to return the mask.
+        Preserves <|bos|> and the trailing <|user_end|><|assistant_start|> delimiter
+        even if the prompt exceeds max_tokens, preventing unterminated user prompts.
         """
         # We have some surgery to do: we need to pop the last message (of the Assistant)
         conversation = copy.deepcopy(conversation) # avoid mutating the original
@@ -410,11 +431,21 @@ class RustBPETokenizer:
         assert messages[-1]["role"] == "assistant", "Last message must be from the Assistant"
         messages.pop() # remove the last message (of the Assistant) inplace
 
-        # Now tokenize the conversation
-        ids, mask = self.render_conversation(conversation)
+        # Tokenize without right-truncating off <|user_end|>
+        ids, _ = self.render_conversation(conversation, max_tokens=None)
+
+        assistant_start = self.encode_special("<|assistant_start|>")
+        if max_tokens is not None and len(ids) + 1 > max_tokens:
+            bos = self.get_bos_token_id()
+            user_start = self.encode_special("<|user_start|>")
+            user_end = self.encode_special("<|user_end|>")
+            budget = max(4, max_tokens - 1)
+            # Keep <|bos|>, <|user_start|>, the latest prompt tokens, and <|user_end|>
+            tail_len = budget - 3
+            content_tail = ids[2:-1][-tail_len:] if tail_len > 0 else []
+            ids = [bos, user_start] + content_tail + [user_end]
 
         # Finally, to prime the Assistant for a completion, append the Assistant start token
-        assistant_start = self.encode_special("<|assistant_start|>")
         ids.append(assistant_start)
         return ids
 

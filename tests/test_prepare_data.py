@@ -350,6 +350,86 @@ def test_cot_collection_asks_for_a_config_that_exists():
     assert cfg["hf_subset"] == "default"
 
 
+def test_vyber_and_nemotron_agentic_sft_sources_and_converters():
+    """Verify Vyber07/cyber-security and nvidia/Nemotron-SFT-Agentic-v4 are wired as SFT sources."""
+    from scripts.data import download_sft_data
+
+    # 1. Source registration
+    vyber_cfg = download_sft_data.SOURCES["vyber_cybersec"]
+    assert vyber_cfg["hf_name"] == "Vyber07/cyber-security"
+    assert "data_files" in vyber_cfg and "train" in vyber_cfg["data_files"]
+
+    nem_tc_cfg = download_sft_data.SOURCES["nemotron_agentic_tool_calling"]
+    assert nem_tc_cfg["hf_name"] == "nvidia/Nemotron-SFT-Agentic-v4"
+    assert nem_tc_cfg["split"] == "tool_calling"
+
+    nem_ka_cfg = download_sft_data.SOURCES["nemotron_agentic_knowledge"]
+    assert nem_ka_cfg["hf_name"] == "nvidia/Nemotron-SFT-Agentic-v4"
+    assert nem_ka_cfg["split"] == "knowledge_agent"
+
+    # 2. Vyber07 capitalized Instruction/Input/Output conversion
+    vyber_row = {
+        "Instruction": "Explain SSRF attack techniques",
+        "Input": "Web application with internal API access",
+        "Output": "SSRF occurs when a server fetches an attacker-controlled URL.",
+    }
+    vyber_msgs = download_sft_data.convert_auto(vyber_row)
+    assert vyber_msgs is not None and len(vyber_msgs) == 2
+    assert "Input:\nWeb application with internal API access" in vyber_msgs[0]["content"]
+
+    # 3. Nemotron-SFT-Agentic-v4 conversion with top-level tools, system policy, reasoning_content, and tool_calls
+    nemotron_row = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "current_weather",
+                    "description": "Fetch current weather for a location.",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        "messages": [
+            {"role": "system", "content": "Follow weather safety guidelines."},
+            {"role": "user", "content": "What is the weather in Wooster, OH?"},
+            {
+                "role": "assistant",
+                "reasoning_content": "I should call current_weather for Wooster, OH.",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "current_weather",
+                            "arguments": '{"location": "Wooster, OH"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": '{"temperature_f": 72, "conditions": "Partly cloudy"}',
+            },
+            {
+                "role": "assistant",
+                "reasoning_content": "Now summarize the 72F partly cloudy report.",
+                "content": "It is currently 72°F and partly cloudy in Wooster, OH.",
+                "tool_calls": [],
+            },
+        ],
+    }
+    nem_msgs = download_sft_data._sanitize_and_validate_messages(
+        download_sft_data.convert_openai_tool_calls(nemotron_row)
+    )
+    assert nem_msgs is not None and len(nem_msgs) == 2
+    assert "Follow weather safety guidelines." in nem_msgs[0]["content"]
+    assert "Available tools:\n- current_weather:" in nem_msgs[0]["content"]
+    parts = nem_msgs[1]["content"]
+    assert [p["type"] for p in parts] == ["think", "tool", "tool_output", "think", "text"]
+
+
 def test_sft_only_sources_excluded_from_pretraining():
     # The instruction/chat/DPO datasets that were moved to SFT must not leak
     # back into the pretraining mixture.

@@ -265,3 +265,66 @@ def test_different_seeds_introduce_variation_when_temperature_nonzero():
 
     # Sanity check: sampling actually introduces variation
     assert len(outputs) > 1, "All seeds produced the same output which is statistically highly improbable."
+
+
+def test_repetition_penalty_excludes_special_tokens():
+    """apply_repetition_penalty must never penalize special tokens (such as <|assistant_end|>)."""
+    from mesosfer.eval.engine import apply_repetition_penalty
+
+    logits = torch.tensor([[2.0, 2.0, 2.0, -2.0]])
+    # Tokens 0, 1, 2, 3 all appeared in history; token 1 and 3 are special tokens
+    apply_repetition_penalty(
+        logits,
+        [[0, 1, 2, 3]],
+        penalty=2.0,
+        exclude_tokens={1, 3},
+    )
+    # Token 0 (positive, non-excluded) is divided by 2.0 -> 1.0
+    assert torch.isclose(logits[0, 0], torch.tensor(1.0))
+    # Token 1 (excluded special token) is untouched -> 2.0
+    assert torch.isclose(logits[0, 1], torch.tensor(2.0))
+    # Token 2 (positive, non-excluded) is divided by 2.0 -> 1.0
+    assert torch.isclose(logits[0, 2], torch.tensor(1.0))
+    # Token 3 (excluded special token) is untouched -> -2.0
+    assert torch.isclose(logits[0, 3], torch.tensor(-2.0))
+
+
+def test_duplicate_tool_call_loop_breaker():
+    """Consecutive identical tool calls must inject a limit error once and hard-stop if repeated again."""
+    tokenizer = ByteTokenizer()
+    tool_start = tokenizer.encode_special("<|tool_start|>")
+    tool_end = tokenizer.encode_special("<|tool_end|>")
+    output_start = tokenizer.encode_special("<|output_start|>")
+    output_end = tokenizer.encode_special("<|output_end|>")
+    payload = tokenizer.encode("1+1")
+    one_call = [tool_start] + payload + [tool_end]
+
+    class EndlessDuplicateToolModel(MockModel):
+        """Model that stubbornly tries to emit <|tool_start|>1+1<|tool_end|> forever."""
+        def __init__(self):
+            super().__init__(vocab_size=262)
+            self.cursor = 0
+
+        def forward(self, ids, kv_cache=None):
+            B, T = ids.shape
+            if kv_cache is not None:
+                kv_cache.advance(T)
+            last_id = int(ids[0, -1].item())
+            # Advance our cyclic tool-call cursor only when our own tokens are fed back
+            if T > 1 or last_id == output_end:
+                self.cursor = 0
+            elif last_id == one_call[self.cursor]:
+                self.cursor = (self.cursor + 1) % len(one_call)
+            logits = torch.full((B, T, self.vocab_size), -100.0)
+            logits[:, -1, one_call[self.cursor]] = 100.0
+            return logits
+
+    engine = Engine(EndlessDuplicateToolModel(), tokenizer)
+    prompt = [261, 72, 105]
+    results, _ = engine.generate_batch(prompt, num_samples=1, max_tokens=200, temperature=0.0)
+    generated = results[0][len(prompt):]
+    # Must stop well before max_tokens=200 (after 1 real output + 1 duplicate error output, then hard-stop on 3rd tool_start)
+    assert len(generated) < 120
+    assert generated.count(output_start) == 2
+    assert "duplicate or maximum tool call limit reached" in tokenizer.decode(generated)
+
