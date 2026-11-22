@@ -78,6 +78,18 @@ from mesosfer.utils.common import COMPUTE_DTYPE
 EPS = 1e-12
 
 
+def _get_fp8_dtypes():
+    """Select FP8 dtypes for the active GPU (FNUZ on AMD CDNA3 gfx94x, IEEE elsewhere)."""
+    if getattr(torch.version, "hip", None) and torch.cuda.is_available():
+        arch = getattr(torch.cuda.get_device_properties(0), "gcnArchName", "")
+        if arch.startswith("gfx94"):
+            return torch.float8_e4m3fnuz, torch.float8_e5m2fnuz
+    return torch.float8_e4m3fn, torch.float8_e5m2
+
+
+FP8_FWD_DTYPE, FP8_BWD_DTYPE = _get_fp8_dtypes()
+
+
 @torch.no_grad()
 def _to_fp8(x, fp8_dtype):
     """Dynamically quantize a tensor to FP8 using tensorwise scaling.
@@ -132,8 +144,8 @@ class _Float8Matmul(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_2d, weight):
         # Quantize both operands to e4m3 (higher precision format)
-        input_fp8, input_inv = _to_fp8(input_2d, torch.float8_e4m3fn)
-        weight_fp8, weight_inv = _to_fp8(weight, torch.float8_e4m3fn)
+        input_fp8, input_inv = _to_fp8(input_2d, FP8_FWD_DTYPE)
+        weight_fp8, weight_inv = _to_fp8(weight, FP8_FWD_DTYPE)
         ctx.save_for_backward(input_fp8, input_inv, weight_fp8, weight_inv)
 
         # output = input @ weight.T
@@ -160,7 +172,7 @@ class _Float8Matmul(torch.autograd.Function):
         # === GEMM 1: grad_input = grad_output @ weight ===
         # Shapes: [B, N] @ [N, K] -> [B, K]
         # Gradients use e5m2 (wider range), weights use e4m3 (higher precision)
-        go_fp8, go_inv = _to_fp8(grad_output, torch.float8_e5m2)
+        go_fp8, go_inv = _to_fp8(grad_output, FP8_BWD_DTYPE)
         # go_fp8 is [B, N] contiguous = row-major, good for first arg
         # w_fp8 is [N, K] contiguous = row-major, need column-major for second arg
         w_col = _to_col_major(w_fp8)

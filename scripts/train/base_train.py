@@ -202,7 +202,13 @@ if args.init_from:
         if req_kv != model_config.n_kv_head:
             raise ValueError(f"--n-kv-head={args.n_kv_head} (resolved {req_kv}) disagrees with checkpoint '{init_from_tag}' (n_kv_head={model_config.n_kv_head}). Omit the flag to keep the checkpoint's KV heads.")
     if passed("--max-seq-len") and args.max_seq_len != model_config.sequence_len:
-        raise ValueError(f"--max-seq-len={args.max_seq_len} disagrees with checkpoint '{init_from_tag}' (sequence_len={model_config.sequence_len}). Omit the flag to keep the checkpoint's context length.")
+        print0(f"--init-from: updating sequence_len {model_config.sequence_len} -> {args.max_seq_len} (curriculum context extension)")
+        model_config.sequence_len = args.max_seq_len
+        model.window_sizes = model._compute_window_sizes(model_config)
+        if args.max_seq_len > model.cos.size(1):
+            model.rotary_seq_len = args.max_seq_len * 10
+            head_dim = model_config.n_embd // model_config.n_head
+            model.cos, model.sin = model._precompute_rotary_embeddings(model.rotary_seq_len, head_dim, device=device)
     if depth_explicit and args.depth != model_config.n_layer:
         raise ValueError(f"--depth={args.depth} disagrees with checkpoint '{init_from_tag}' (n_layer={model_config.n_layer}). Omit --depth to use the checkpoint's own config.")
     if aspect_explicit:
