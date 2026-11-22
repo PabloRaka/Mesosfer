@@ -1,0 +1,38 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in Mesosfer
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact command(s) and arguments used.
+      placeholder: |
+        1. Run `python -m scripts.train.base_train ...`
+        2. Observe error
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, PyTorch version, GPU model, CUDA/ROCm version.
+      placeholder: |
+        - OS: Ubuntu 24.04
+        - Python: 3.12
+        - PyTorch: 2.x
+        - GPU / Backend: e.g. MI300X (ROCm 7.2) / H100 (CUDA 12.8) / CPU
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      render: shell
