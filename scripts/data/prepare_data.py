@@ -2598,6 +2598,89 @@ def _pick_bucket(samplers, stats, stage="pretrain"):
                - written_by_bucket[b] / written)
 
 
+class _PrefetchIterator:
+    """Prefetch batches from a blocking streaming iterator in a background thread.
+
+    Preserves exact FIFO document order while overlapping HTTP I/O, gzip/parquet
+    decompression, and decoding across all active sources in parallel.
+    """
+    _SENTINEL = object()
+
+    def __init__(self, iterable, batch_size=32, max_batches=4):
+        import queue
+        import threading
+        self._q = queue.Queue(maxsize=max_batches)
+        self._stop = threading.Event()
+        self._buf = []
+        self._pos = 0
+        self._done = False
+        self._thread = threading.Thread(
+            target=self._worker,
+            args=(iter(iterable), max(1, batch_size)),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _worker(self, it, batch_size):
+        import queue
+        try:
+            while not self._stop.is_set():
+                batch = []
+                for _ in range(batch_size):
+                    if self._stop.is_set():
+                        return
+                    try:
+                        batch.append(next(it))
+                    except StopIteration:
+                        if batch:
+                            self._put(batch)
+                        return
+                self._put(batch)
+        except Exception as exc:
+            self._put(exc)
+        finally:
+            self._put(self._SENTINEL)
+
+    def _put(self, item):
+        import queue
+        while not self._stop.is_set():
+            try:
+                self._q.put(item, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._pos < len(self._buf):
+            item = self._buf[self._pos]
+            self._pos += 1
+            return item
+        if self._done:
+            raise StopIteration
+        nxt = self._q.get()
+        if nxt is self._SENTINEL:
+            self._done = True
+            raise StopIteration
+        if isinstance(nxt, BaseException):
+            self._done = True
+            raise nxt
+        self._buf = nxt
+        self._pos = 1
+        return self._buf[0]
+
+    def close(self):
+        import queue
+        self._stop.set()
+        while True:
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                break
+
+
 def interleaved_shuffle_main(args, source_names, output_dir):
     """Stream docs from all sources simultaneously with weighted interleaving.
 
@@ -2675,14 +2758,20 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     checkpoint_dir = args.checkpoint_dir or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     checkpoint_every_bytes = int(args.checkpoint_every_gb * 1024 * 1024 * 1024)
 
-    # Open all source iterators
-    logger.info(f"Opening {len(source_names)} source iterators for interleaved streaming...")
+    # Open all source iterators with background prefetching so HTTP I/O and
+    # decompression run concurrently across sources while preserving FIFO order.
+    from concurrent.futures import ThreadPoolExecutor
+    logger.info(f"Opening {len(source_names)} source iterators for parallel-prefetch interleaved streaming...")
     logger.info(f"  Cluster size: {cluster_size} docs per domain run")
     logger.info(f"  Sampling temperature: {temperature}")
     source_iters = {}
     for name in source_names:
         config = DATASET_SOURCES[name]
-        source_iters[name] = iter(stream_dataset_texts(name, config))
+        source_iters[name] = _PrefetchIterator(
+            stream_dataset_texts(name, config),
+            batch_size=cluster_size,
+            max_batches=4,
+        )
 
     # Active sources (those not yet exhausted)
     active_sources = list(source_names)
@@ -2692,102 +2781,123 @@ def interleaved_shuffle_main(args, source_names, output_dir):
     current_shard = []
     current_shard_chars = 0
     exhausted_count = 0
+    write_pool = ThreadPoolExecutor(max_workers=2)
+    pending_writes = []
+
+    def _drain_writes(max_pending=0):
+        while len(pending_writes) > max_pending:
+            pending_writes.pop(0).result()
 
     print()
-    print("  🔀 INTERLEAVED SHUFFLE MODE")
+    print("  🔀 INTERLEAVED SHUFFLE MODE (PARALLEL PREFETCH + ASYNC PARQUET WRITER)")
     print(f"  Stage: {stage} | Cluster size: {cluster_size} | Temperature: {temperature}")
     print(f"  Active sources: {len(active_sources)}")
     print("  Target mix: " + " | ".join(
         f"{b} {100 * _bucket_target_share(b):.0f}%" for b in sorted(samplers)))
     print()
 
-    while active_sources:
-        if global_max_chars is not None and global_chars >= global_max_chars:
-            logger.info("Global --max-tokens limit reached.")
-            break
-
-        # Pick the bucket that is behind on its target share, then a source inside it
-        bucket = _pick_bucket(samplers, stats, stage)
-        bucket_names, bucket_probs = samplers[bucket]
-        chosen_name = rng.choices(bucket_names, weights=bucket_probs, k=1)[0]
-        it = source_iters[chosen_name]
-
-        # Draw a cluster of docs from the chosen source
-        docs_drawn = 0
-        for _ in range(cluster_size):
-            try:
-                text = next(it)
-            except StopIteration:
-                # Source exhausted — remove it
-                logger.info(f"  ✓ {chosen_name} exhausted after {stats[chosen_name]['docs']:,} docs")
-                active_sources.remove(chosen_name)
-                del source_iters[chosen_name]
-                if active_sources:
-                    samplers = _build_bucket_samplers(active_sources, temperature, stage)
-                exhausted_count += 1
+    try:
+        while active_sources:
+            if global_max_chars is not None and global_chars >= global_max_chars:
+                logger.info("Global --max-tokens limit reached.")
                 break
 
-            # cpt stage: the cyber pool bucket has no per-source leaf (see
-            # CPT_CYBER_POOL_BUCKET) — classify this document and rejection-sample it
-            # against its leaf's target share, so over-supplied leaves don't crowd out
-            # starved ones. MAX_CONSECUTIVE_SKIPS forces acceptance either way.
-            cyber_leaf = None
-            if stage == "cpt" and bucket == CPT_CYBER_POOL_BUCKET:
-                cyber_leaf = classify_cyber_subdomain(text)
-                if _cyber_leaf_should_skip(cyber_leaf, leaf_stats, global_chars, consecutive_cyber_skips):
-                    consecutive_cyber_skips += 1
-                    continue
-                consecutive_cyber_skips = 0
+            # Pick the bucket that is behind on its target share, then a source inside it
+            bucket = _pick_bucket(samplers, stats, stage)
+            bucket_names, bucket_probs = samplers[bucket]
+            chosen_name = rng.choices(bucket_names, weights=bucket_probs, k=1)[0]
+            it = source_iters[chosen_name]
 
-            if global_max_chars is not None and global_chars + len(text) > global_max_chars:
-                global_chars = global_max_chars
-                break
+            # Draw a cluster of docs from the chosen source
+            docs_drawn = 0
+            for _ in range(cluster_size):
+                try:
+                    text = next(it)
+                except StopIteration:
+                    # Source exhausted — remove it
+                    logger.info(f"  ✓ {chosen_name} exhausted after {stats[chosen_name]['docs']:,} docs")
+                    active_sources.remove(chosen_name)
+                    source_iters.pop(chosen_name).close()
+                    if active_sources:
+                        samplers = _build_bucket_samplers(active_sources, temperature, stage)
+                    exhausted_count += 1
+                    break
 
-            current_shard.append(text)
-            current_shard_chars += len(text)
-            stats[chosen_name]["docs"] += 1
-            stats[chosen_name]["chars"] += len(text)
-            global_chars += len(text)
-            docs_drawn += 1
-            if cyber_leaf is not None:
-                leaf_stats[cyber_leaf]["docs"] += 1
-                leaf_stats[cyber_leaf]["chars"] += len(text)
+                # cpt stage: the cyber pool bucket has no per-source leaf (see
+                # CPT_CYBER_POOL_BUCKET) — classify this document and rejection-sample it
+                # against its leaf's target share, so over-supplied leaves don't crowd out
+                # starved ones. MAX_CONSECUTIVE_SKIPS forces acceptance either way.
+                cyber_leaf = None
+                if stage == "cpt" and bucket == CPT_CYBER_POOL_BUCKET:
+                    cyber_leaf = classify_cyber_subdomain(text)
+                    if _cyber_leaf_should_skip(cyber_leaf, leaf_stats, global_chars, consecutive_cyber_skips):
+                        consecutive_cyber_skips += 1
+                        continue
+                    consecutive_cyber_skips = 0
 
-            # Flush shard when full (by doc count or buffered bytes, whichever hits first)
-            if len(current_shard) >= args.shard_size or current_shard_chars >= SHARD_BUFFER_MAX_CHARS:
-                # Shuffle WITHIN the shard for extra randomness
-                rng.shuffle(current_shard)
-                train_docs, val_docs = split_train_val_docs(current_shard, args.val_ratio)
+                if global_max_chars is not None and global_chars + len(text) > global_max_chars:
+                    global_chars = global_max_chars
+                    break
+
+                current_shard.append(text)
+                current_shard_chars += len(text)
+                stats[chosen_name]["docs"] += 1
+                stats[chosen_name]["chars"] += len(text)
+                global_chars += len(text)
+                docs_drawn += 1
+                if cyber_leaf is not None:
+                    leaf_stats[cyber_leaf]["docs"] += 1
+                    leaf_stats[cyber_leaf]["chars"] += len(text)
+
+                # Flush shard when full (by doc count or buffered bytes, whichever hits first)
+                if len(current_shard) >= args.shard_size or current_shard_chars >= SHARD_BUFFER_MAX_CHARS:
+                    # Shuffle WITHIN the shard for extra randomness
+                    rng.shuffle(current_shard)
+                    train_docs, val_docs = split_train_val_docs(current_shard, args.val_ratio)
+                    shard_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.parquet")
+                    if train_docs:
+                        pending_writes.append(write_pool.submit(write_shard, train_docs, shard_path))
+                        shard_idx += 1
+                    if val_docs:
+                        vp_idx = val_part_idx
+                        val_part_idx += 1
+                        pending_writes.append(write_pool.submit(write_val_part, val_docs, output_dir, vp_idx))
+                    current_shard = []
+                    current_shard_chars = 0
+                    # Backpressure: keep at most 4 in-flight shard writes so RAM stays bounded
+                    _drain_writes(max_pending=4)
+
+                    current_bytes = get_total_parquet_bytes(output_dir)
+                    if current_bytes - bytes_at_last_checkpoint >= checkpoint_every_bytes:
+                        _drain_writes(max_pending=0)
+                        create_checkpoint(output_dir, checkpoint_dir, checkpoint_number)
+                        bytes_at_last_checkpoint = get_total_parquet_bytes(output_dir)
+                        checkpoint_number += 1
+
+            # Progress logging every 500k docs
+            total_docs = sum(s["docs"] for s in stats.values())
+            if total_docs % 500_000 < cluster_size:
+                est_tokens = int(global_chars / CHARS_PER_TOKEN)
+                logger.info(f"  Interleaved progress: {total_docs:,} docs, ~{est_tokens:,} tokens, "
+                            f"{len(active_sources)} sources active")
+
+        # Flush remaining docs
+        if current_shard:
+            rng.shuffle(current_shard)
+            train_remaining, val_docs = split_train_val_docs(current_shard, args.val_ratio)
+            if train_remaining:
                 shard_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.parquet")
-                if train_docs:
-                    write_shard(train_docs, shard_path)
-                    shard_idx += 1
-                val_part_idx = write_val_part(val_docs, output_dir, val_part_idx)
-                current_shard = []
-                current_shard_chars = 0
-
-                current_bytes = get_total_parquet_bytes(output_dir)
-                if current_bytes - bytes_at_last_checkpoint >= checkpoint_every_bytes:
-                    create_checkpoint(output_dir, checkpoint_dir, checkpoint_number)
-                    bytes_at_last_checkpoint = current_bytes
-                    checkpoint_number += 1
-
-        # Progress logging every 500k docs
-        total_docs = sum(s["docs"] for s in stats.values())
-        if total_docs % 500_000 < cluster_size:
-            est_tokens = int(global_chars / CHARS_PER_TOKEN)
-            logger.info(f"  Interleaved progress: {total_docs:,} docs, ~{est_tokens:,} tokens, "
-                        f"{len(active_sources)} sources active")
-
-    # Flush remaining docs
-    if current_shard:
-        rng.shuffle(current_shard)
-        train_remaining, val_docs = split_train_val_docs(current_shard, args.val_ratio)
-        if train_remaining:
-            shard_path = os.path.join(output_dir, f"shard_{shard_idx:05d}.parquet")
-            write_shard(train_remaining, shard_path)
-            shard_idx += 1
-        val_part_idx = write_val_part(val_docs, output_dir, val_part_idx)
+                pending_writes.append(write_pool.submit(write_shard, train_remaining, shard_path))
+                shard_idx += 1
+            if val_docs:
+                vp_idx = val_part_idx
+                val_part_idx += 1
+                pending_writes.append(write_pool.submit(write_val_part, val_docs, output_dir, vp_idx))
+        _drain_writes(max_pending=0)
+    finally:
+        for it in source_iters.values():
+            it.close()
+        write_pool.shutdown(wait=True)
 
     # Write final validation shard. Fixed filename, not a shard_idx slot — see
     # val_shard_path().
