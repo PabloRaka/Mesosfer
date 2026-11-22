@@ -211,50 +211,54 @@ oversample small high-value datasets.
 Wired into the training mixture via `tasks/cybersec_sft.py` (default epochs shown) and `scripts/chat/chat_sft.py`.
 
 
-| Dataset              | File                                           | Language | Default Epochs | Notes                                                |
-| :--------------------- | :----------------------------------------------- | :--------- | :--------------- | :----------------------------------------------------- |
-| CyberDefensive       | `cyber_defensive_conversations(_en).jsonl`     | ID + EN  | 1              | Defensive cybersec Q&A (SOC, triage, IR).            |
-| CloudSecurity        | `cloud_security_sft(_en).jsonl`                | ID + EN  | 20             | Cloud IR (AWS, Azure, GCP).                          |
-| MultiTurnSOC         | `multi_turn_soc_sft.jsonl`                     | EN       | 30             | Multi-turn SOC dialogues (oversampled).              |
-| ToolOrientedCyber    | `tool_oriented_cyber_sft.jsonl`                | EN       | 20             | Tool-oriented cybersec (nmap, burp…).               |
-| ToolCalling          | `tool_calling_conversations_en.jsonl`          | EN       | 4              | Tool-calling (WHOIS, dig, hashes).                   |
-| MythosCombined       | `mythos_combined_sft(_en).jsonl`               | ID + EN  | 4              | Offensive/defensive narrative scenarios.             |
-| MythosToolCalling    | `mythos_tool_calling(_en).jsonl`               | ID + EN  | 4              | Mythos with native tool calling.                     |
-| mesosferValidation   | `mesosfer_validation_conversations(_en).jsonl` | ID + EN  | 2              | Domain alignment validation.                         |
-| GeminiTeacher        | `gemini_teacher_conversations.jsonl`           | EN       | 2              | Gemini-distilled teacher conversations.              |
-| Identity             | `identity_conversations(_en).jsonl`            | ID + EN  | 2              | Synthetic identity conversations.                    |
-| Rules                | `rules.jsonl`                                  | EN       | 4              | Safety/format/behavioral instructions.               |
-| InstructionFollowing | `instruction_following_conversations_en.jsonl` | EN       | 4              | Format constraints (json, word count).               |
+| Dataset                | File                                           | Language | Default Epochs | Notes                                                                                     |
+| :--------------------- | :--------------------------------------------- | :------- | :------------- | :---------------------------------------------------------------------------------------- |
+| CyberDefensive         | `cyber_defensive_conversations(_en).jsonl`     | ID + EN  | 1              | Defensive cybersec Q&A (SOC, triage, IR).                                                 |
+| CloudSecurity          | `cloud_security_sft(_en).jsonl`                | ID + EN  | 2              | Cloud IR (AWS, Azure, GCP) with native `think` parts.                                     |
+| MultiTurnSOC           | `multi_turn_soc_sft.jsonl`                     | EN       | 0              | Disabled by default (`0`).                                                                |
+| ToolOrientedCyber      | `tool_oriented_cyber_sft.jsonl`                | EN       | 1              | Tool-oriented cybersec (nmap, burp…) with native `think` parts.                           |
+| OffensiveAgenticLab    | `offensive_agentic_lab_sft.jsonl`              | EN       | 1              | 2,000 multi-stage lab/CTF `think→tool→output` traces (canonical tools, failures, reports).|
+| ToolCalling            | `tool_calling_conversations_en.jsonl`          | EN       | 4              | Tool-calling (WHOIS, dig, hashes, log parsing, refusals).                                 |
+| RealAgenticToolCalling | `real_agentic_tool_calling_sft.jsonl`          | EN       | 2              | Curated single- and two-step agentic tool trajectories across all 8 canonical tools.      |
+| MythosCombined         | `mythos_combined_sft(_en).jsonl`               | ID + EN  | 0              | Disabled by default (`0`).                                                                |
+| MythosToolCalling      | `mythos_tool_calling(_en).jsonl`               | ID + EN  | 0              | Disabled by default (`0`).                                                                |
+| mesosferValidation     | `mesosfer_validation_conversations(_en).jsonl` | ID + EN  | 0              | Held-out domain alignment eval split (never trained).                                     |
+| GeminiTeacher          | `gemini_teacher_conversations.jsonl`           | EN       | 4              | Distilled teacher conversations.                                                          |
+| AgenticCoding          | `agentic_coding_sft.jsonl`                     | ID + EN  | 2              | 659 multi-turn agentic coding, debugging, reasoning (`think`) & tool-use traces.          |
+| Identity               | `identity_conversations(_en).jsonl`            | ID + EN  | 2              | Balanced synthetic identity conversations.                                                |
+| Rules                  | `rules.jsonl`                                  | EN       | 4              | Safety/format/behavioral instructions.                                                    |
+| InstructionFollowing   | `instruction_following_conversations_en.jsonl` | EN       | 4              | Format constraints (json, word count).                                                    |
 
 ### 3B. External datasets (downloaded by `download_sft_data.py` into `data/sft/`)
 
 
-| Key                          | Source / Origin                                         | Max Rows | Default Epochs | Notes                                                                                                       |
-| :----------------------------- | :-------------------------------------------------------- | :--------- | :--------------- | :------------------------------------------------------------------------------------------------------------ |
-| `primus_instruct`            | `trendmicro-ailab/Primus-Instruct`                      | 100K     | 1              | Trend Micro cybersec instructions (**gated**).                                                              |
-| `primus_reasoning`           | `trendmicro-ailab/Primus-Reasoning`                     | 50K      | 1              | Cybersec chain-of-thought (**gated**).                                                                      |
-| `cybernative_vuln_dpo`       | `CyberNative/Code_Vulnerability_Security_DPO`           | 10K      | 3              | Vulnerable vs fixed code (DPO→SFT).                                                                        |
-| `openhermes`                 | `teknium/OpenHermes-2.5`                                | 50K      | 1              | General conversational instruction.                                                                         |
-| `ultrachat`                  | `HuggingFaceH4/ultrachat_200k`                          | 100K     | 1              | Multi-turn conversations.                                                                                   |
-| `trendyol_cyber_sft`         | `Trendyol/...-Cybersecurity-Instruction-Tuning-Dataset` | 53K      | 1              | Defensive cybersec Q&A.                                                                                     |
-| `tiamz_cybersec`             | `Tiamz/cybersecurity-instruction-dataset`               | 15K      | 2              | Cybersec instruction Q&A.                                                                                   |
-| `alpaca_indonesian`          | `ilhamfadheel/alpaca-cleaned-indonesian`                | 55K      | 1              | Indonesian instruction-following.                                                                           |
-| `magpie_reasoning_sft`       | `Magpie-Align/Magpie-Reasoning-V2`                      | 50K      | 1              | DeepSeek-R1-Llama reasoning.                                                                                |
-| `open_thoughts_sft`          | `open-thoughts/OpenThoughts-114k`                       | 50K      | 1              | Reasoning / CoT conversations.                                                                              |
-| `nist_cybersec`              | `ethanolivertroy/nist-cybersecurity-training`           | 50K      | 1              | NIST cybersec training conversations.                                                                       |
-| `fenrir_v2`                  | `AlicanKiraz0/Cybersecurity-Dataset-Fenrir-v2.1`        | 99K      | 1              | Cybersec Q&A (OWASP/MITRE/NIST).                                                                            |
-| `code_feedback`              | `m-a-p/Code-Feedback`                                   | 50K      | 1              | Multi-language coding feedback/instruction.                                                                 |
-| `numinamath_cot`             | `AI-MO/NuminaMath-CoT`                                  | 50K      | 1              | Competition math with chain-of-thought.                                                                     |
-| `aquilax_security_reasoning` | `tuandunghcmut/AquilaX-AI-security-assistant-reasoning` | 18.3K    | 2              | Cybersec vuln-analysis reasoning (CoT). Reasoning template stripped of Llama-3 reserved tokens (**gated**). |
-| `xlam_function_calling`      | `Salesforce/xlam-function-calling-60k`                  | 20K      | 1              | Generic named tool-calling (APIGen, cc-by-4.0); rendered as `<\|tool_start\|>` JSON `{name, arguments}` — shell, scanners, SQL, HTTP (**gated**). |
-| `hermes_func_calling`        | `NousResearch/hermes-function-calling-v1` (`func_calling`) | 20K   | 2              | Multi-turn tool calling, apache-2.0. Ungated counterpart to xLAM — without `HF_TOKEN` this is the main external tool-calling source. `<tool_call>` XML → native tool/tool_output parts. |
-| `hermes_glaive_func_calling` | `NousResearch/hermes-function-calling-v1` (`glaive_func_calling`) | 20K | 1     | Glaive function calling, already cleaned into ShareGPT turns. Preferred over raw `glaiveai/glaive-function-calling-v2`, which needs brittle text parsing. |
-| `kimi_k3_traces`             | `greghavens/kimi-k3-coding-and-debugging-traces`        | 4K       | 4              | Agentic coding/debugging trajectories with multi-step tool use and reasoning (cc-by-4.0). OpenAI-style `tool_calls`; `arguments` JSON string decoded to dict so `parse_tool_call` accepts it. |
-| `cot_collection`             | `kaist-ai/CoT-Collection` (`en`)                        | 50K      | 1              | Chain-of-thought rationales across many NLP tasks (cc-by-4.0). Repo ships only a loading script, so it is read via `revision=refs/convert/parquet`. |
-| `qyrou_reasoning`            | `Qyrou/reasoning-corpus-4K-5M-v1`                       | 50K      | 1              | Reasoning distilled from frontier models, apache-2.0. Has an explicit `thought_trace` column, so no thinking-tag parsing needed. |
-| `vyber_cybersec`             | `Vyber07/cyber-security`                                | 100K     | 1              | PhD-level cybersecurity SFT (ShareGPT & Instruction/IO JSONL subsets across offensive/defensive/web/cloud/AI security, **gated**). |
-| `nemotron_agentic_tool_calling` | `nvidia/Nemotron-SFT-Agentic-v4` (`tool_calling`)    | 50K      | 1              | Multi-turn agentic tool-use trajectories with `reasoning_content` → `<\|think_start\|>` and OpenAI `tool_calls` → `<\|tool_start\|>`. |
-| `nemotron_agentic_knowledge` | `nvidia/Nemotron-SFT-Agentic-v4` (`knowledge_agent`)    | 25K      | 1              | Policy- and document-grounded multi-turn tool-use conversations with reasoning traces. |
+| Key                             | Source / Origin                                                   | Max Rows | Default Epochs | Notes                                                                                                       |
+| :------------------------------ | :---------------------------------------------------------------- | :------- | :------------- | :---------------------------------------------------------------------------------------------------------- |
+| `primus_instruct`               | `trendmicro-ailab/Primus-Instruct`                                | 100K     | 1              | Trend Micro cybersec instructions (**gated**).                                                              |
+| `primus_reasoning`              | `trendmicro-ailab/Primus-Reasoning`                               | 50K      | 1              | Cybersec chain-of-thought (**gated**).                                                                      |
+| `cybernative_vuln_dpo`          | `CyberNative/Code_Vulnerability_Security_DPO`                     | 10K      | 2              | Vulnerable vs fixed code (DPO→SFT).                                                                         |
+| `openhermes`                    | `teknium/OpenHermes-2.5`                                          | 50K      | 1              | General conversational instruction.                                                                         |
+| `ultrachat`                     | `HuggingFaceH4/ultrachat_200k`                                    | 100K     | 1              | Multi-turn conversations.                                                                                   |
+| `trendyol_cyber_sft`            | `Trendyol/...-Cybersecurity-Instruction-Tuning-Dataset`           | 53K      | 1              | Defensive cybersec Q&A.                                                                                     |
+| `tiamz_cybersec`                | `Tiamz/cybersecurity-instruction-dataset`                         | 15K      | 2              | Cybersec instruction Q&A.                                                                                   |
+| `alpaca_indonesian`             | `ilhamfadheel/alpaca-cleaned-indonesian`                          | 55K      | 2              | Indonesian instruction-following.                                                                           |
+| `alpaca_gpt4_indonesian`        | `FreedomIntelligence/alpaca-gpt4-indonesian`                      | 52K      | 2              | GPT-4 Indonesian instruction-following.                                                                     |
+| `magpie_reasoning_sft`          | `Magpie-Align/Magpie-Reasoning-V2`                                | 50K      | 1              | DeepSeek-R1-Llama reasoning.                                                                                |
+| `open_thoughts_sft`             | `open-thoughts/OpenThoughts-114k`                                 | 50K      | 1              | Reasoning / CoT conversations.                                                                              |
+| `nist_cybersec`                 | `ethanolivertroy/nist-cybersecurity-training`                     | 50K      | 1              | NIST cybersec training conversations.                                                                       |
+| `fenrir_v2`                     | `AlicanKiraz0/Cybersecurity-Dataset-Fenrir-v2.1`                  | 99K      | 1              | Cybersec Q&A (OWASP/MITRE/NIST).                                                                            |
+| `code_feedback`                 | `m-a-p/Code-Feedback`                                             | 50K      | 1              | Multi-language coding feedback/instruction.                                                                 |
+| `numinamath_cot`                | `AI-MO/NuminaMath-CoT`                                            | 50K      | 1              | Competition math with chain-of-thought.                                                                     |
+| `aquilax_security_reasoning`    | `tuandunghcmut/AquilaX-AI-security-assistant-reasoning`           | 18.3K    | 2              | Cybersec vuln-analysis reasoning (CoT). Reasoning template stripped of Llama-3 reserved tokens (**gated**). |
+| `xlam_function_calling`         | `Salesforce/xlam-function-calling-60k`                            | 20K      | 2              | Generic named tool-calling (APIGen, cc-by-4.0); rendered as `<\|tool_start\|>` JSON `{name, arguments}` — shell, scanners, SQL, HTTP (**gated**). |
+| `hermes_func_calling`           | `NousResearch/hermes-function-calling-v1` (`func_calling`)        | 20K      | 3              | Multi-turn tool calling, apache-2.0. Ungated counterpart to xLAM — without `HF_TOKEN` this is the main external tool-calling source. `<tool_call>` XML → native tool/tool_output parts. |
+| `hermes_glaive_func_calling`    | `NousResearch/hermes-function-calling-v1` (`glaive_func_calling`) | 20K      | 1              | Glaive function calling, already cleaned into ShareGPT turns. Preferred over raw `glaiveai/glaive-function-calling-v2`, which needs brittle text parsing. |
+| `kimi_k3_traces`                | `greghavens/kimi-k3-coding-and-debugging-traces`                  | 4K       | 4              | Agentic coding/debugging trajectories with multi-step tool use and reasoning (cc-by-4.0). OpenAI-style `tool_calls`; `arguments` JSON string decoded to dict so `parse_tool_call` accepts it. |
+| `cot_collection`                | `kaist-ai/CoT-Collection` (`default`, `refs/convert/parquet`)     | 50K      | 1              | Chain-of-thought rationales across many NLP tasks (cc-by-4.0). Repo ships only a loading script, so it is read via `revision=refs/convert/parquet`. |
+| `qyrou_reasoning`               | `Qyrou/reasoning-corpus-4K-5M-v1`                                 | 50K      | 1              | Reasoning distilled from frontier models, apache-2.0. Has an explicit `thought_trace` column, so no thinking-tag parsing needed. |
+| `vyber_cybersec`                | `Vyber07/cyber-security`                                          | 100K     | 1              | PhD-level cybersecurity SFT (ShareGPT & Instruction/IO JSONL subsets across offensive/defensive/web/cloud/AI security, **gated**). |
+| `nemotron_agentic_tool_calling` | `nvidia/Nemotron-SFT-Agentic-v4` (`tool_calling`)                 | 50K      | 1              | Multi-turn agentic tool-use trajectories with `reasoning_content` → `<\|think_start\|>` and OpenAI `tool_calls` → `<\|tool_start\|>`. |
+| `nemotron_agentic_knowledge`    | `nvidia/Nemotron-SFT-Agentic-v4` (`knowledge_agent`)              | 25K      | 1              | Policy- and document-grounded multi-turn tool-use conversations with reasoning traces. |
 
 > All external datasets above are wired into the default training mixture
 > (`tasks/cybersec_sft.py` → `build_cybersec_sft_tasks`, with CLI epoch flags in
@@ -284,9 +288,10 @@ Evaluation runs through CORE + domain probes (`scripts/eval/base_eval.py`,
 
 | Task                     | Source                                          | Shots | Notes                                                          |
 | :------------------------- | :------------------------------------------------ | :------ | :--------------------------------------------------------------- |
-| `mmlu_computer_security` | `cais/mmlu` (computer_security)                 | 5     | Cybersec subset of MMLU.                                       |
-| `cybermetric_500`        | `tuandunghcmut/cybermetric_500_v1`              | 3     | Cybersecurity knowledge MCQ.                                   |
-| `secbench_mcq_en`        | `secbench-hf/SecBench` (`data/MCQs_2730.jsonl`) | 3     | English single-answer MCQs (~652); includes Logical Reasoning. |
+| `mmlu_computer_security`   | `cais/mmlu` (computer_security)                 | 5     | Cybersec subset of MMLU.                                                                               |
+| `cybermetric_500`          | `tuandunghcmut/cybermetric_500_v1`              | 3     | Cybersecurity knowledge MCQ.                                                                           |
+| `secbench_mcq_en`          | `secbench-hf/SecBench` (`data/MCQs_2730.jsonl`) | 3     | English single-answer MCQs (~652); includes Logical Reasoning.                                         |
+| `cybersec_agentic_lab_eval`| `data/eval/cybersec_agentic_lab_eval.jsonl`     | —     | 18 multi-step agentic lab/CTF eval cases (incl. negative, retry & scope-refusal) via `scripts/eval/cybersec_agentic_eval.py`. |
 
 ### 4C. Coding domain (CodeMMLU, 3-shot)
 
@@ -351,7 +356,7 @@ dependency on Llama-3 / OpenAI tool formats):
 | `<\|output_start\|>` … `<\|output_end\|>` | Tool / evaluator result returned from the environment | no (not supervised) |
 
 Sources:
-- **Local** (`data/sft/`): `tool_calling_conversations_en.jsonl`, `mythos_tool_calling*.jsonl`, `tool_oriented_cyber_sft.jsonl` (generated by `dev/` scripts).
+- **Local** (`data/sft/`): `tool_calling_conversations_en.jsonl`, `mythos_tool_calling*.jsonl`, `tool_oriented_cyber_sft.jsonl`, `offensive_agentic_lab_sft.jsonl` (generated by `dev/` scripts).
 - **External** (HF), all converted to the generic `<|tool_start|>` format in `download_sft_data.py`:
   `xlam_function_calling` via `convert_function_calling` (**gated**);
   `hermes_func_calling` and `hermes_glaive_func_calling` via `convert_sharegpt_tool_calls` (`<tool_call>` XML tags);
@@ -367,3 +372,57 @@ Sources:
 > pair supports every tool family. At inference the model only *emits* tool calls;
 > an external harness is responsible for execution — shell/network tools must never
 > be auto-executed by the model server.
+
+### 8.1 Offensive agentic data and offline eval
+
+Offensive depth is added in two complementary layers:
+
+1. **CPT** (`scripts/data/prepare_data.py`) supplies the raw knowledge — exploitation
+   techniques, Metasploit/ExploitDB material, vulnerability analysis — as plain text.
+2. **SFT** (`dev/generate_offensive_agentic_sft.py`) teaches the *procedure*: when to
+   call a tool, how to read its output, how to chain steps, and how to report impact
+   plus remediation. Every assistant turn is a multipart
+   `think → tool → tool_output → (repeat) → text` message.
+
+Both are scoped to **authorized lab / CTF** work: synthetic hostnames and
+RFC1918/RFC5737 addresses, fake credentials, `LAB{...}` flags, scripted tool output.
+No malware, persistence, evasion, destructive actions, or real targets.
+
+The generator is aligned with the runtime contract, not with generic shell data:
+
+- tools are exactly the ones `scripts/chat/chat_cli.py` advertises — `terminal`,
+  `python`, `read_file`, `write_file`, `list_files`, `grep_files`, `subnet`,
+  `subagent`;
+- tool results match `mesosfer/sandbox/runner.py` in shape: raw stdout,
+  `Command executed successfully (no stdout).`, `Error (<code>):\n<stderr>`,
+  `File saved to <path> (<n> bytes).`, or `File <name> not found.`;
+- engagements are multi-stage (recon → enumeration → validation → impact →
+  remediation → report) across web/API, AD/SMB, cloud, Kubernetes, CI/CD,
+  network services, forensics, malware triage, reverse engineering, crypto,
+  and SOC triage;
+- realism is deliberate: about a third of traces include an infrastructure
+  failure and recovery (nmap `Host seems down` → `-Pn`, curl timeout, resolver
+  timeout, SMB timeout, rate-limited directory busting), and scenarios include
+  dead ends and negative results (WAF-blocked SQLi, patched CVE, no AS-REP hash)
+  so the model learns to say "not confirmed" instead of inventing a finding.
+
+```bash
+# regenerate the training set (deterministic with --seed; ~9.8 MB for 2000 rows)
+python dev/generate_offensive_agentic_sft.py --num-rows 2000 --seed 42
+# regenerate the held-out eval set (18 cases)
+python dev/generate_cybersec_agentic_eval.py
+```
+
+The eval (`scripts/eval/cybersec_agentic_eval.py`) runs the model through the real
+`ToolHarness` loop with **mock tool handlers**, so no network or process execution
+happens. It scores two axes separately: tool selection (did it call the required
+tools, avoid forbidden ones, and stay within the call budget?) and conclusion
+(does the *final* answer contain the required finding, with tool output excluded
+from the match?). The set includes negative cases (`not confirmed`, patched
+version) and an out-of-scope refusal case where no tool may be called. This
+complements the knowledge benchmarks in `scripts/eval/base_eval.py` (CyberMetric
+500, SecBench, MMLU Computer Security), which measure recall, not procedure.
+
+```bash
+python -m scripts.eval.cybersec_agentic_eval -i sft --output eval_agentic.json
+```
