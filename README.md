@@ -82,9 +82,27 @@ uv sync --extra gpu
 
 Data preparation must be completed **before** training. Run these steps in order:
 
-#### Step 2a — Download and Prepare Pretraining Datasets
+#### Step 2a — Download and Prepare Pretraining Datasets (Rust — Recommended)
 
-This single command automatically downloads the ClimbMix general pretraining shards (~17 GB) and prepares/interleaves the cybersecurity domain datasets (CVE feeds, HuggingFace cybersec datasets, and local files):
+Use the multi-threaded Rust preparer (`tools/fast_prepare`) to download, filter, balance (50% General / 25% Code / 15% Cybersecurity / 10% Reasoning), and write Parquet train/val shards into `~/.cache/mesosfer/base_data_cybersecurity` (~4 min for 40B tokens on a fast connection):
+
+```bash
+# Install Rust (if needed): https://rustup.rs
+# curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Build once
+cargo build --release --manifest-path tools/fast_prepare/Cargo.toml
+
+# Prepare 40.2B tokens (default for d24 ratio=15; adjust --max-tokens as needed)
+./tools/fast_prepare/target/release/fast_prepare \
+    --max-tokens 40202409240 \
+    --workers 24 \
+    --writer-threads 6 \
+    --fresh
+```
+
+<details>
+<summary>Python fallback (slower, no Rust toolchain required)</summary>
 
 ```bash
 python -m scripts.data.prepare_data
@@ -95,6 +113,8 @@ python -m scripts.data.prepare_data --status
 # Dry-run to preview sources
 python -m scripts.data.prepare_data --dry-run
 ```
+
+</details>
 
 #### Step 2b — Convert raw security logs to natural language
 
@@ -285,7 +305,7 @@ Valid `reason` values: `inappropriate_response`, `continuous_repetition`, `factu
 ## Full Pipeline Summary
 
 ```
-Step 2a: scripts.data.prepare_data         ─┐  (auto-downloads ClimbMix shards)
+Step 2a: tools/fast_prepare (Rust)         ─┐  (or scripts.data.prepare_data)
 Step 2b: scripts.data.convert_logs_to_nl   ─┘  can run in parallel
          ↓
 Step 3:  scripts.train.tok_train
@@ -339,6 +359,7 @@ mesosfer/
 │   ├── synthetic-soc/      # Synthetic SOC analyst data
 │   └── reverse-engineering/ # RE/exploitation analysis data
 ├── runs/                   # Training run scripts (speedrun, miniseries, etc.)
+├── tools/                  # Rust fast_prepare (multi-threaded dataset preparer)
 └── tests/                  # Unit tests
 ```
 
