@@ -195,7 +195,7 @@ fn list_hf_files(client: &Client, token: Option<&str>, repo: &str, prefix: &str)
             .get("link")
             .and_then(|v| v.to_str().ok())
             .and_then(parse_next_link);
-        let entries: Vec<HfTreeEntry> = resp.json()?;
+        let entries: Vec<HfTreeEntry> = serde_json::from_reader(resp)?;
         for e in entries {
             if e.entry_type == "file"
                 && (e.path.ends_with(".parquet")
