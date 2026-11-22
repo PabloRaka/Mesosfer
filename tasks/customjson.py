@@ -8,8 +8,8 @@ import json
 from tasks.common import Task
 
 
-# Part types allowed inside a list-form assistant message (tool-calling SFT).
-_VALID_PART_TYPES = ("text", "calc", "calc_output", "tool", "tool_output")
+# Part types allowed inside a list-form assistant message (reasoning & tool-calling SFT).
+_VALID_PART_TYPES = ("text", "think", "tool", "tool_output")
 
 
 def _is_valid_conversation(messages) -> bool:

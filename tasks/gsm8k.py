@@ -94,9 +94,9 @@ class GSM8K(Task):
                 else:
                     expr, result = inner, ""
                 # Add the tool call as a part
-                assistant_message_parts.append({"type": "calc", "text": expr})
+                assistant_message_parts.append({"type": "tool", "text": expr})
                 # Add the result as a part
-                assistant_message_parts.append({"type": "calc_output", "text": result})
+                assistant_message_parts.append({"type": "tool_output", "text": result})
             else:
                 # Regular text in between tool calls
                 assistant_message_parts.append({"type": "text", "text": part})

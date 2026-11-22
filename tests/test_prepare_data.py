@@ -100,12 +100,12 @@ def test_climbmix_keeps_general_text_without_security_keywords():
 def test_sampling_probabilities_prefer_cyber_and_local_over_general():
     # Weights rank sources INSIDE a bucket; cross-bucket size is TARGET_DOMAIN_SHARE.
     cyber = ["local_incident_response", "circl_vuln_patch"]
-    general = ["climbmix", "wikipedia"]
+    general = ["climbmix", "wikipedia_id"]
     cyber_probs = dict(zip(cyber, prepare_data._build_sampling_probs(cyber)))
     general_probs = dict(zip(general, prepare_data._build_sampling_probs(general)))
 
     assert cyber_probs["circl_vuln_patch"] > cyber_probs["local_incident_response"]
-    assert general_probs["climbmix"] > general_probs["wikipedia"]
+    assert general_probs["climbmix"] > general_probs["wikipedia_id"]
 
 
 def test_indonesian_sources_land_in_general():
@@ -293,7 +293,7 @@ def test_source_schema_is_frozen_and_scales_token_caps():
 def test_dataset2_sources_are_available_without_breaking_dry_run():
     assert "project_zero" in prepare_data.DATASET_SOURCES
     assert prepare_data.DATASET_SOURCES["project_zero"]["source_type"] == "rss"
-    assert prepare_data.DOMAIN_SAMPLING_WEIGHTS["project_zero"] > prepare_data.DOMAIN_SAMPLING_WEIGHTS["wikipedia"]
+    assert prepare_data.DOMAIN_SAMPLING_WEIGHTS["project_zero"] > prepare_data.DOMAIN_SAMPLING_WEIGHTS["climbmix"]
 
 
 def test_dataset2_vocabulary_only_applies_to_dataset2_sources():

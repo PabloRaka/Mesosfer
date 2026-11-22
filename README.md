@@ -359,15 +359,16 @@ mesosfer/
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--depth` | 32 | Transformer depth (32 ≈ 13.7B params at 96K vocab / legacy VE; ~9.3B with `--ve-layers=4`) |
+| `--depth` | 24 | Transformer depth (24 ≈ 3.36B total / 2.68B scaling params at 96K vocab with default 4:1 GQA + `--ve-layers=4`) |
 | `--aspect-ratio` | 128 | Model dimension = depth × aspect-ratio |
 | `--head-dim` | 128 | Attention head dimension |
-| `--max-seq-len` | 2048 | Maximum context length |
+| `--n-kv-head` | -1 | KV heads for GQA (-1 = auto 4:1 GQA when `n_head >= 8` & divisible by 4; 0 = full MHA; K>0 = explicit) |
+| `--max-seq-len` | 8192 | Maximum context length |
 | `--device-batch-size` | 32 | Batch size per GPU |
-| `--target-param-data-ratio` | 15 | Data-to-parameters ratio (~100B tokens at depth 32; 10 = faster/undertrained) |
+| `--target-param-data-ratio` | 15 | Data-to-parameters ratio (~40B tokens at depth 24 with 4:1 GQA; 10 = faster/undertrained) |
 | `--warmup-steps` | 200 | LR warmup steps (200 for depth 20+) |
 | `--window-pattern` | L | Attention window: L=full, S=sliding (L required for ROCm) |
-| `--ve-layers` | -1 | Value-embedding placement: -1 = legacy (~half layers); K≥0 = first K layers + last only (cuts vocab-sized VE tables & memory) |
+| `--ve-layers` | 4 | Value-embedding placement: -1 = legacy (~half layers); K≥0 = first K layers + last only (cuts vocab-sized VE tables & memory) |
 | `--grad-checkpoint` | off | Activation checkpointing: recompute each block in backward to save activation memory (~30% extra compute; needed for deep/wide models) |
 | `--save-every` | 1000 | Checkpoint every N steps |
 | `--core-metric-every` | 5000 | CORE eval every N steps |

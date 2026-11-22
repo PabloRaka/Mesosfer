@@ -201,9 +201,9 @@ Then count the occurrences of '{letter}':
         assistant_parts.append({"type": "text", "text": "\n\nLet me double check this using Python:\n\n"})
         # Part 3: Python tool call
         calc_expr = f"'{word}'.count('{letter}')"
-        assistant_parts.append({"type": "calc", "text": calc_expr})
+        assistant_parts.append({"type": "tool", "text": calc_expr})
         # Part 4: Python output
-        assistant_parts.append({"type": "calc_output", "text": str(count)})
+        assistant_parts.append({"type": "tool_output", "text": str(count)})
         # Part 5: Final answer
         assistant_parts.append({"type": "text", "text": f"\n\nPython gives us {count}.\n\nMy final answer is:\n\n#### {count}"})
 
@@ -297,9 +297,9 @@ if __name__ == "__main__":
         for part in assistant_parts:
             if part['type'] == 'text':
                 print(part['text'], end='')
-            elif part['type'] == 'calc':
+            elif part['type'] == 'tool':
                 print(f"<<{part['text']}=", end='')
-            elif part['type'] == 'calc_output':
+            elif part['type'] == 'tool_output':
                 print(f"{part['text']}>>", end='')
         print()
         print("-" * 100)

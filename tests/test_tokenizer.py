@@ -47,7 +47,7 @@ def test_no_unused_dead_special_tokens():
         "<|bos|>",
         "<|user_start|>", "<|user_end|>",
         "<|assistant_start|>", "<|assistant_end|>",
-        "<|calc_start|>", "<|calc_end|>",
+        "<|think_start|>", "<|think_end|>",
         "<|output_start|>", "<|output_end|>",
         "<|tool_start|>", "<|tool_end|>",
     }
@@ -209,6 +209,25 @@ def test_render_conversation_tool_call_parts(tok):
         # tool output (from the environment) is NOT supervised
         if tid == output_start:
             assert m == 0
+
+
+def test_render_conversation_think_parts(tok):
+    conv = {"messages": [
+        {"role": "user", "content": "What is 17 * 23?"},
+        {"role": "assistant", "content": [
+            {"type": "think", "text": "17 * 20 = 340, 17 * 3 = 51, total = 391."},
+            {"type": "text", "text": "391"},
+        ]},
+    ]}
+    ids, mask = tok.render_conversation(conv)
+    assert len(ids) == len(mask)
+
+    think_start = tok.encode_special("<|think_start|>")
+    think_end = tok.encode_special("<|think_end|>")
+    assert think_start in ids and think_end in ids
+    for tid, m in zip(ids, mask):
+        if tid in (think_start, think_end):
+            assert m == 1
 
 
 # -----------------------------------------------------------------------------

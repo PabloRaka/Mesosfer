@@ -226,10 +226,8 @@ class RowState:
     def __init__(self, current_tokens=None):
         self.current_tokens = current_tokens or [] # Current token sequence for this row
         self.forced_tokens = deque() # Queue of tokens to force inject
-        self.in_calc_block = False # Whether we are inside a python calc block
-        self.calc_expr_tokens = [] # Tokens of the current python calc expression
-        self.in_tool_block = False # Whether we are inside a named tool block
-        self.tool_tokens = [] # Tokens of the current named tool call payload
+        self.in_tool_block = False # Whether we are inside a tool call block
+        self.tool_tokens = [] # Tokens of the current tool call payload
         self.completed = False # Whether this row has completed generation
 
 class Engine:
@@ -261,8 +259,6 @@ class Engine:
 
         # Get the special tokens we need to coordinate the tool use state machine
         get_special = lambda s: self.tokenizer.encode_special(s)
-        calc_start = get_special("<|calc_start|>")
-        calc_end = get_special("<|calc_end|>")
         tool_start = get_special("<|tool_start|>")
         tool_end = get_special("<|tool_end|>")
         output_start = get_special("<|output_start|>")
@@ -339,25 +335,7 @@ class Engine:
                 elif stop_on_tool_call and next_token == tool_end:
                     state.completed = True
 
-                # Handle calculator logic (<|calc_start|> ... <|calc_end|>)
-                if next_token == calc_start:
-                    state.in_calc_block = True
-                    state.calc_expr_tokens = []
-                elif next_token == calc_end and state.in_calc_block:
-                    state.in_calc_block = False
-                    if state.calc_expr_tokens:
-                        expr = self.tokenizer.decode(state.calc_expr_tokens)
-                        result = use_calculator(expr)
-                        if result is not None:
-                            result_tokens = self.tokenizer.encode(str(result))
-                            state.forced_tokens.append(output_start)
-                            state.forced_tokens.extend(result_tokens)
-                            state.forced_tokens.append(output_end)
-                    state.calc_expr_tokens = []
-                elif state.in_calc_block:
-                    state.calc_expr_tokens.append(next_token)
-
-                # Handle named tool logic (<|tool_start|> ... <|tool_end|>)
+                # Handle tool logic (<|tool_start|> ... <|tool_end|>)
                 if next_token == tool_start:
                     state.in_tool_block = True
                     state.tool_tokens = []

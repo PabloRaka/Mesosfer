@@ -34,14 +34,6 @@ def tool_output_part(result: str) -> dict:
     return {"type": "tool_output", "text": result}
 
 
-def calc_part(code: str) -> dict:
-    return {"type": "calc", "text": code}
-
-
-def calc_output_part(result: str) -> dict:
-    return {"type": "calc_output", "text": result}
-
-
 def make_json_tool_conversation(
     user: str,
     thinking: str,
@@ -73,8 +65,8 @@ def make_calc_conversation(
         {"role": "user", "content": user},
         {"role": "assistant", "content": [
             text_part(thinking),
-            calc_part(code),
-            calc_output_part(tool_output),
+            tool_part(code),
+            tool_output_part(tool_output),
             text_part(conclusion),
         ]},
     ]

@@ -240,8 +240,11 @@ bos = tokenizer.get_bos_token_id()
 user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
 assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
 tool_start, tool_end = tokenizer.encode_special("<|tool_start|>"), tokenizer.encode_special("<|tool_end|>")
-calc_start, calc_end = tokenizer.encode_special("<|calc_start|>"), tokenizer.encode_special("<|calc_end|>")
 output_start, output_end = tokenizer.encode_special("<|output_start|>"), tokenizer.encode_special("<|output_end|>")
+try:
+    think_start, think_end = tokenizer.encode_special("<|think_start|>"), tokenizer.encode_special("<|think_end|>")
+except KeyError:
+    think_start, think_end = None, None
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
@@ -523,6 +526,7 @@ while True:
     renderer = CodeBlockState()
     t_start = time.time()
     try:
+        in_think_disp = False
         in_tool_disp = False
         in_output_disp = False
         for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
@@ -530,11 +534,19 @@ while True:
             response_tokens.append(token)
             if token == assistant_end:
                 break
-            if token in (tool_start, calc_start):
+            if think_start is not None and token == think_start:
+                in_think_disp = True
+                print(f"\n{C.gray}╭─ Thinking {'─' * max(10, TERM_WIDTH - 15)}╮\n│ ", end="", flush=True)
+                continue
+            if think_end is not None and token == think_end:
+                in_think_disp = False
+                print(f"\n╰{'─' * max(10, TERM_WIDTH - 2)}╯{C.reset}\n", end="", flush=True)
+                continue
+            if token == tool_start:
                 in_tool_disp = True
                 print(f"\n{C.purple}╭─ {C.teal}{C.bold}⚙ Tool Call{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 18)}╮{C.reset}\n{C.purple}│{C.reset} {C.cyan}", end="", flush=True)
                 continue
-            if token in (tool_end, calc_end):
+            if token == tool_end:
                 in_tool_disp = False
                 print(f"{C.reset}\n{C.purple}├─ {C.teal}{C.bold}Sandbox Result{C.reset}{C.purple}{'─' * max(10, TERM_WIDTH - 21)}┤{C.reset}\n", end="", flush=True)
                 continue
@@ -548,8 +560,11 @@ while True:
                 continue
 
             token_text = tokenizer.decode([token])
-            response_text_list.append(token_text)
-            if in_tool_disp:
+            if not in_think_disp:
+                response_text_list.append(token_text)
+            if in_think_disp:
+                print(f"{C.gray}{token_text}{C.reset}", end="", flush=True)
+            elif in_tool_disp:
                 print(f"{C.cyan}{token_text}{C.reset}", end="", flush=True)
             elif in_output_disp:
                 print(f"{C.green}{token_text}{C.reset}", end="", flush=True)
